@@ -1,65 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-脚本名称：文件夹同步与清理脚本
-脚本功能：
-    该脚本用于实时监控多个源目录的文件变化，并同步文件到目标目录。支持媒体文件类型（如视频、音频）的同步，并生成 `.strm` 文件以便于流媒体播放。
-    此脚本支持文件的创建、修改、删除操作，并可清理目标目录中的过期文件。
-
-    主要功能：
-    - 同步指定目录的文件到目标目录。
-    - 对媒体文件类型（如 .mp4、.mkv 等）创建 `.strm` 文件。
-    - 支持覆盖已存在的文件。
-    - 支持启用或禁用清理功能，删除目标目录中不再需要的文件。
-    - 全量同步模式：每次脚本启动时，执行源目录与目标目录的完整同步。
-    - 自动日志管理：自动分割日志文件，确保不会超过最大大小。
-
-使用方法：
-    1. 配置环境变量，设置源目录和目标目录的映射关系、媒体文件类型等。
-        - `SYNC_DIRECTORIES`：源目录、目标目录以及 `.strm` 路径前缀的映射。
-        - `MEDIA_FILE_TYPES`：指定要同步的媒体文件类型，使用分号分隔多个类型。
-        - `OVERWRITE_EXISTING`：配置是否覆盖已存在的文件。
-        - `ENABLE_CLEANUP`：启用或禁用文件清理功能。
-        - `FULL_SYNC_ON_STARTUP`：是否在脚本启动时执行全量同步。
-        - `LOG_FILE`：日志文件路径。
-        - `MAX_LOG_FILES`：最多保留的日志文件数量。
-    2. 运行脚本，脚本会根据配置开始监控文件夹，并自动同步和清理文件。
-
-参数说明：
-    - `SYNC_DIRECTORIES`：一个以分号分隔的字符串列表，定义多个源目录与目标目录的映射。每个映射由源目录、目标目录和媒体路径前缀组成，格式为：
-        "源目录 目标目录 /strm路径前缀"
-        示例：
-            "C:/Users/Username/Desktop/media/Movies C:/Users/Username/Desktop/test/Movies /media/Movies"
-            这表示源目录 `C:/Users/Username/Desktop/media/Movies` 中的文件会同步到目标目录 `C:/Users/Username/Desktop/test/Movies`，并为每个媒体文件生成一个 `.strm` 文件，路径前缀为 `/media/Movies`。
-    - `MEDIA_FILE_TYPES`：指定需要同步的文件类型。使用分号分隔多个文件类型，例如：
-        "*.mp4;*.mkv;*.avi" 表示同步 `.mp4`、`.mkv` 和 `.avi` 格式的文件。
-    - `OVERWRITE_EXISTING`：布尔值（`True` 或 `False`），决定是否覆盖目标目录中已存在的文件。如果为 `True`，则会覆盖同名文件；如果为 `False`，则跳过已存在的文件。
-    - `ENABLE_CLEANUP`：布尔值（`True` 或 `False`），启用或禁用清理功能。当为 `True` 时，如果文件在源目录中被删除，目标目录中对应的文件也会被删除。
-    - `FULL_SYNC_ON_STARTUP`：布尔值（`True` 或 `False`），决定是否在脚本启动时执行全量同步。若为 `True`，则会遍历源目录中的所有文件并同步到目标目录，默认值为 `True`。
-    - `LOG_FILE`：指定日志文件的路径，默认日志路径为 `/config/logs/sync.log`。如果路径中不存在相应的文件夹，脚本会自动创建。
-    - `MAX_LOG_FILES`：指定最多保留的日志文件数量。若超过该数量，脚本会删除最旧的日志文件。默认值为 5。
-    - `MAX_LOG_FILE_SIZE`：日志文件的最大大小（字节）。默认值为 5MB（5 * 1024 * 1024 字节）。当日志文件超过该大小时，脚本会创建新的日志文件并备份旧的日志文件。
-
-依赖库：
-    - `os`：用于处理文件和目录操作。
-    - `shutil`：用于执行文件复制和删除操作。
-    - `datetime`：用于获取当前时间并生成日志文件名。
-    - `logging`：用于记录脚本的运行日志。
-    - `re`：用于正则表达式匹配文件类型。
-    - `time`：用于设置脚本的运行间隔。
-    - `watchdog`：用于监控文件系统变化（文件创建、修改、删除）。
-
-注意事项：
-    - 确保在运行脚本前，已备份目标目录中的重要文件，以避免覆盖或丢失数据。
-    - 脚本将同步所有符合 `MEDIA_FILE_TYPES` 中配置的文件类型，若目标目录中已有同名文件并且 `OVERWRITE_EXISTING` 设置为 `True`，这些文件会被覆盖。
-    - 启用清理功能时，脚本会删除目标目录中与源目录中已删除文件对应的文件，请确保清理操作不会删除不需要的文件。
-    - 启用全量同步时，脚本会遍历源目录中的所有文件并执行同步操作，这可能会导致初次运行时耗时较长。
-
-版权信息：
-    Copyright (c) 2024 作者姓名。保留所有权利。
-"""
-
 import os
 import shutil
 import datetime
@@ -69,59 +7,32 @@ import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# 日志文件路径
-LOG_FILE = os.getenv('LOG_FILE', '/config/logs/sync.log')
-
-# 创建日志文件夹（如果不存在）
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-
-# 配置路径映射
-SYNC_DIRECTORIES = os.getenv('SYNC_DIRECTORIES', '').split(';')  # 多个路径映射用分号分隔
-
-# 媒体文件类型配置（共用）
-MEDIA_FILE_TYPES = os.getenv('MEDIA_FILE_TYPES', "*.mp4;*.mkv;*.ts;*.iso;*.rmvb;*.avi;*.mov;*.mpeg;*.mpg;*.wmv;*.3gp;*.asf;*.m4v;*.flv;*.m2ts;*.strm;*.tp;*.f4v").split(';')
-
-# 是否覆盖已存在的文件
-OVERWRITE_EXISTING = os.getenv('OVERWRITE_EXISTING', 'False').lower() == 'true'
-
-# 是否启用清理功能
-ENABLE_CLEANUP = os.getenv('ENABLE_CLEANUP', 'False').lower() == 'true'
-
-# 是否执行全量遍历同步
-FULL_SYNC_ON_STARTUP = os.getenv('FULL_SYNC_ON_STARTUP', 'True').lower() == 'true'
-
-# 最大日志文件大小（字节），超过该大小时自动清理日志（5MB）
+# 配置文件路径
+LOG_FILE = "C:/Users/xxx/Desktop/sync.log"
+SYNC_DIRECTORIES = [
+    # "C:/Users/xxx/Desktop/media/Movies C:/Users/xxxx/Desktop/test/Movies /media/Movies",
+    # "C:/Users/xxx/Desktop/media/TVShows C:/Users/xxx/Desktop/test/TVShows /media/TVShows",
+    "C:/Users/xxx/Desktop/media/Anime C:/Users/xxx/Desktop/test/Anime /media/Anime"
+]
+MEDIA_FILE_TYPES = [
+    "*.mp4", "*.mkv", "*.ts", "*.iso", "*.rmvb", "*.avi", "*.mov", "*.mpeg",
+    "*.mpg", "*.wmv", "*.3gp", "*.asf", "*.m4v", "*.flv", "*.m2ts", "*.strm",
+    "*.tp", "*.f4v"
+]
+OVERWRITE_EXISTING = True
+ENABLE_CLEANUP = True
+FULL_SYNC_ON_STARTUP = True
 MAX_LOG_FILE_SIZE = 5 * 1024 * 1024
+MAX_LOG_FILES = 5
 
-# 最多保留日志文件数量
-MAX_LOG_FILES = int(os.getenv('MAX_LOG_FILES', 5))
+# 是否启用直链模式 (True: 启用直链, False: 启用相对路径)
+USE_DIRECT_LINK = True
+# 是否启用相对路径模式 (True: 启用相对路径, False: 启用直链)
+USE_RELATIVE_PATH = False
 
+# 直链基础 URL (用户可以修改这个地址)
+BASE_URL = "https://xxxx.xxxxx.com:1234/d/115网盘"
 
-# # 日志文件路径
-# LOG_FILE = "C:/Users/Username/Desktop/sync.log"
-# # 配置路径映射
-# # 格式: "源目录 目标目录 /strm路径前缀"
-# SYNC_DIRECTORIES = [
-#     "C:/Users/Username/Desktop/media/Movies C:/Users/Username/Desktop/test/Movies /media/Movies",
-#     "C:/Users/Username/Desktop/media/TVShows C:/Users/Username/Desktop/test/TVShows /media/TVShows",
-#     "C:/Users/Username/Desktop/media/Anime C:/Users/Username/Desktop/test/Anime /media/Anime"
-# ]
-# # 媒体文件类型配置（共用）
-# MEDIA_FILE_TYPES = [
-#     "*.mp4", "*.mkv", "*.ts", "*.iso", "*.rmvb", "*.avi", "*.mov", "*.mpeg",
-#     "*.mpg", "*.wmv", "*.3gp", "*.asf", "*.m4v", "*.flv", "*.m2ts", "*.strm",
-#     "*.tp", "*.f4v"
-# ]
-# # 是否覆盖已存在的文件
-# OVERWRITE_EXISTING = True
-# # 是否启用清理功能
-# ENABLE_CLEANUP = True
-# # 是否执行全量遍历同步
-# FULL_SYNC_ON_STARTUP = True
-# # 最大日志文件大小（字节），超过该大小时自动清理日志（5MB）
-# MAX_LOG_FILE_SIZE = 5 * 1024 * 1024
-# # 最多保留日志文件数量
-# MAX_LOG_FILES = 5
 
 # 初始化日志
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -184,13 +95,22 @@ class SyncHandler(FileSystemEventHandler):
                     self.delete_strm_file(rel_path)
 
     def create_strm_file(self, relative_path):
-        strm_relative_path = f"{self.media_prefix}/{relative_path}"
-        target_strm_file = os.path.join(self.target_dir, os.path.splitext(relative_path)[0] + ".strm").replace("\\", "/")
+        # 如果启用了直链模式，使用 BASE_URL 拼接成完整的 URL
+        if USE_DIRECT_LINK:
+            # 生成完整的直链 URL
+            strm_content = f"{BASE_URL}{self.media_prefix}/{relative_path}"
+        else:
+            # 否则，生成相对路径
+            strm_content = f"{self.media_prefix}/{relative_path}"
+
+        # 目标 .strm 文件的路径
+        target_strm_file = os.path.join(self.target_dir, os.path.splitext(relative_path)[0] + ".strm").replace("\\",
+                                                                                                               "/")
 
         # 检查是否需要跳过生成
         if os.path.exists(target_strm_file):
             if OVERWRITE_EXISTING:
-                # 仅记录覆盖日志，不重复生成日志
+                # 如果文件已存在且允许覆盖，删除并重新生成
                 try:
                     os.remove(target_strm_file)
                     log_message(f"覆盖: 重新生成 .strm 文件: {target_strm_file}")
@@ -204,10 +124,9 @@ class SyncHandler(FileSystemEventHandler):
         try:
             os.makedirs(os.path.dirname(target_strm_file), exist_ok=True)
             with open(target_strm_file, "w") as f:
-                f.write(strm_relative_path)
+                f.write(strm_content)
             # 记录生成成功日志
-            if not os.path.exists(target_strm_file):
-                log_message(f"成功生成 .strm 文件: {target_strm_file}")
+            log_message(f"成功生成 .strm 文件: {target_strm_file}")
         except Exception as e:
             log_message(f"错误: 无法生成 .strm 文件: {target_strm_file}, {e}")
 
@@ -282,7 +201,10 @@ for mapping in SYNC_DIRECTORIES:
         for root, _, files in os.walk(source_dir):
             for file in files:
                 relative_path = os.path.relpath(os.path.join(root, file), source_dir).replace("\\", "/")
-                event_handler.create_strm_file(relative_path) if any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in MEDIA_FILE_TYPES) else event_handler.sync_file(relative_path)
+                if any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in MEDIA_FILE_TYPES):
+                    event_handler.create_strm_file(relative_path)
+                else:
+                    event_handler.sync_file(relative_path)
         FULL_SYNC_ON_STARTUP = False
 
     event_handler = SyncHandler(source_dir, target_dir, media_prefix)
