@@ -147,10 +147,13 @@ class SyncHandler(FileSystemEventHandler):
             log_message(f"错误: 无法同步非媒体文件: {source_file_path} -> {target_file_path}, {e}")
 
     def delete_target_file(self, relative_path):
-        """删除目标文件"""
+        """删除目标文件及其关联的 .strm 文件"""
         target_file_path = os.path.join(self.target_dir, relative_path).replace("\\", "/")
+
+        # 如果目标是一个文件，首先删除它
         if os.path.exists(target_file_path):
             try:
+                # 如果是文件夹，使用 rmtree 删除文件夹
                 if os.path.isdir(target_file_path):
                     shutil.rmtree(target_file_path)
                 else:
@@ -158,6 +161,17 @@ class SyncHandler(FileSystemEventHandler):
                 log_message(f"成功删除目标文件: {target_file_path}")
             except Exception as e:
                 log_message(f"错误: 无法删除目标文件: {target_file_path}, {e}")
+
+        # 如果是媒体文件且存在相应的 .strm 文件，删除对应的 .strm 文件
+        # 判断是否是媒体文件并构建 .strm 文件路径
+        if self.is_media_file(relative_path):
+            strm_file_path = os.path.splitext(target_file_path)[0] + ".strm"
+            if os.path.exists(strm_file_path):
+                try:
+                    os.remove(strm_file_path)
+                    log_message(f"成功删除关联的 .strm 文件: {strm_file_path}")
+                except Exception as e:
+                    log_message(f"错误: 无法删除 .strm 文件: {strm_file_path}, {e}")
 
     def on_created(self, event):
         if not event.is_directory:
