@@ -4,6 +4,8 @@ import datetime
 import logging
 import re
 import time
+import threading
+from collections import defaultdict
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -64,6 +66,8 @@ class SyncHandler(FileSystemEventHandler):
         self.source_dir = source_dir
         self.target_dir = target_dir
         self.media_prefix = media_prefix
+        self.debounce_timers = defaultdict(threading.Timer)
+        self.DEBOUNCE_DELAY = 120  # 延迟时间（秒）
 
     def get_relative_path(self, full_path):
         return os.path.relpath(full_path, self.source_dir).replace("\\", "/")
@@ -76,10 +80,44 @@ class SyncHandler(FileSystemEventHandler):
         """检查文件是否是需要忽略的文件类型（例如 .mp）"""
         return os.path.splitext(relative_path)[1].lower() in IGNORE_FILE_TYPES
 
+    def handle_debounced_event(self, event, relative_path):
+        """延迟处理文件事件以防止多次触发"""
+        if event.is_directory:
+            self.handle_directory_event(event, relative_path)
+        else:
+            self.handle_file_event(event, relative_path)
+        # 移除已处理的计时器
+        if relative_path in self.debounce_timers:
+            del self.debounce_timers[relative_path]
+
+    def on_created(self, event):
+        relative_path = self.get_relative_path(event.src_path)
+        if relative_path in self.debounce_timers:
+            self.debounce_timers[relative_path].cancel()
+        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
+        self.debounce_timers[relative_path] = timer
+        timer.start()
+
+    def on_modified(self, event):
+        relative_path = self.get_relative_path(event.src_path)
+        if relative_path in self.debounce_timers:
+            self.debounce_timers[relative_path].cancel()
+        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
+        self.debounce_timers[relative_path] = timer
+        timer.start()
+
+    def on_deleted(self, event):
+        relative_path = self.get_relative_path(event.src_path)
+        # 删除操作一般不需要去抖动，可以立即处理
+        if event.is_directory:
+            self.handle_directory_event(event, relative_path)
+        else:
+            self.handle_file_event(event, relative_path)
+
     def handle_file_event(self, event, relative_path):
         """处理文件的创建、修改或删除"""
         if self.is_ignored_file(relative_path):
-            log_message(f"跳过: 忽略文件类型: {relative_path}")
+            # log_message(f"跳过: 忽略文件类型: {relative_path}")
             return
 
         if event.event_type in ['created', 'modified']:
@@ -161,7 +199,6 @@ class SyncHandler(FileSystemEventHandler):
                 log_message(f"错误: 无法删除目标文件/目录: {target_file_path}, {e}")
 
         # 如果是媒体文件且存在相应的 .strm 文件，删除对应的 .strm 文件
-        # 判断是否是媒体文件并构建 .strm 文件路径
         if self.is_media_file(relative_path):
             strm_file_path = os.path.splitext(target_file_path)[0] + ".strm"
             if os.path.exists(strm_file_path):
@@ -170,26 +207,6 @@ class SyncHandler(FileSystemEventHandler):
                     log_message(f"成功删除关联的 .strm 文件: {strm_file_path}")
                 except Exception as e:
                     log_message(f"错误: 无法删除 .strm 文件: {strm_file_path}, {e}")
-
-    def on_created(self, event):
-        relative_path = self.get_relative_path(event.src_path)
-        if event.is_directory:
-            self.handle_directory_event(event, relative_path)
-        else:
-            self.handle_file_event(event, relative_path)
-
-    def on_modified(self, event):
-        # 对于目录的修改事件，一般不需要特别处理
-        if not event.is_directory:
-            relative_path = self.get_relative_path(event.src_path)
-            self.handle_file_event(event, relative_path)
-
-    def on_deleted(self, event):
-        relative_path = self.get_relative_path(event.src_path)
-        if event.is_directory:
-            self.handle_directory_event(event, relative_path)
-        else:
-            self.handle_file_event(event, relative_path)
 
 
 # 启动文件系统监控器
@@ -243,5 +260,3 @@ except KeyboardInterrupt:
         observer.stop()
     for observer in observers:
         observer.join()
-
-log_message("========== 实时监控同步和清理任务完成 {} ==========".format(datetime.datetime.now()))
