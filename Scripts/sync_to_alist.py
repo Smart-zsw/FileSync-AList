@@ -1,111 +1,426 @@
 import asyncio
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from alist import AList, AListUser  # 确保正确导入 AList SDK
+from alist import AList, AListUser
+
 
 class AListSyncHandler(FileSystemEventHandler):
-    def __init__(self, alist: AList, remote_path: str, local_base_path: str, loop: asyncio.AbstractEventLoop):
+    def __init__(
+            self,
+            alist: AList,
+            remote_base_path: str,
+            local_base_path: str,
+            loop: asyncio.AbstractEventLoop,
+            source_base_directory: str,
+            debounce_delay: float = 1.0,
+            sync_delete: bool = False,
+            file_stable_time: float = 5.0  # 新增：文件稳定时间（秒）
+    ):
         super().__init__()
         self.alist = alist
-        self.remote_path = remote_path
-        self.local_base_path = local_base_path
-        self.loop = loop  # 保存主线程的事件循环
+        self.remote_base_path = remote_base_path.rstrip('/')  # 去除末尾的斜杠
+        self.local_base_path = local_base_path.rstrip('/')
+        self.loop = loop  # 主线程的事件循环
+        self.source_base_directory = source_base_directory.rstrip('/')
+        self.debounce_delay = debounce_delay  # 防抖延迟时间（秒）
+        self.sync_delete = sync_delete  # 同步删除开关
+        self.file_stable_time = file_stable_time  # 文件稳定时间（秒）
+        self._tasks = {}  # 跟踪文件路径到任务的映射
+        self.existing_paths = set()  # 存储启动时已有的文件和文件夹的相对路径
 
-    def get_remote_path(self, src_path):
-        # 计算相对于监控目录的相对路径，并拼接到远程路径
-        relative_path = os.path.relpath(src_path, self.local_base_path)
-        return os.path.join(self.remote_path, relative_path).replace("\\", "/")  # 确保使用正斜杠
+        # 初始化 existing_paths，遍历本地目录并记录所有现有文件和文件夹
+        for root, dirs, files in os.walk(self.local_base_path):
+            rel_root = os.path.relpath(root, self.local_base_path).replace("\\", "/")
+            if rel_root == ".":
+                rel_root = ""
+            for d in dirs:
+                path = os.path.join(rel_root, d).replace("\\", "/")
+                self.existing_paths.add(path)
+            for f in files:
+                path = os.path.join(rel_root, f).replace("\\", "/")
+                self.existing_paths.add(path)
+        logging.info(f"已记录 {len(self.existing_paths)} 个现有路径，不会监控这些路径。")
+
+    def get_relative_path(self, src_path):
+        """
+        计算相对于本地监控基路径的相对路径
+        """
+        return os.path.relpath(src_path, self.local_base_path).replace("\\", "/")  # 确保使用正斜杠
+
+    def get_remote_source_path(self, relative_path):
+        """
+        根据相对路径生成 AList 中的源路径
+        """
+        return f"{self.source_base_directory}/{relative_path}"
+
+    def get_remote_destination_path(self, relative_path):
+        """
+        根据相对路径生成 AList 中的目的路径
+        """
+        return f"{self.remote_base_path}/{relative_path}"
+
+    def schedule_task(self, coro, file_path):
+        """
+        调度一个防抖任务，确保在指定延迟后执行
+        """
+        if file_path in self._tasks:
+            task = self._tasks[file_path]
+            task.cancel()  # 取消之前的任务
+            logging.debug(f"取消之前的任务: {file_path}")
+        # 使用线程安全的方法调度任务
+        future = asyncio.run_coroutine_threadsafe(self.debounce(coro, file_path), self.loop)
+        self._tasks[file_path] = future
+        logging.debug(f"调度新任务: {file_path}")
+
+    async def debounce(self, coro, file_path):
+        """
+        等待防抖延迟后执行协程
+        """
+        try:
+            await asyncio.sleep(self.debounce_delay)
+            await coro
+        except asyncio.CancelledError:
+            logging.debug(f"任务被取消: {file_path}")
+            pass
+        finally:
+            self._tasks.pop(file_path, None)
+            logging.debug(f"任务完成或取消，移除任务: {file_path}")
+
+    async def is_file_complete(self, file_path):
+        """
+        检查文件在指定时间内是否保持大小不变，以确定文件是否完整
+        """
+        logging.debug(f"开始检查文件完整性: {file_path}")
+        previous_size = -1
+        stable_time = 0.0
+        check_interval = 1.0  # 检查间隔（秒）
+
+        while True:
+            if not os.path.exists(file_path):
+                logging.warning(f"文件不存在，无法检查完整性: {file_path}")
+                return False
+            current_size = os.path.getsize(file_path)
+            if current_size == previous_size:
+                stable_time += check_interval
+                logging.debug(f"文件大小未变化，稳定时间: {stable_time:.1f}/{self.file_stable_time} 秒")
+                if stable_time >= self.file_stable_time:
+                    logging.info(f"文件已完成写入: {file_path}")
+                    return True
+            else:
+                stable_time = 0.0
+                logging.debug(f"文件大小变化，从 {previous_size} 到 {current_size}")
+                previous_size = current_size
+            await asyncio.sleep(check_interval)
+
+    def schedule_complete_task(self, coro, file_path):
+        """
+        调度一个完整性检查后的任务
+        """
+        if file_path in self._tasks:
+            task = self._tasks[file_path]
+            task.cancel()
+            logging.debug(f"取消之前的完整性检查任务: {file_path}")
+        future = asyncio.run_coroutine_threadsafe(self.debounce(coro, file_path), self.loop)
+        self._tasks[file_path] = future
+        logging.debug(f"调度完整性检查后的新任务: {file_path}")
 
     async def handle_created_or_modified(self, event):
+        """
+        处理文件或文件夹的创建和修改事件
+        """
+        relative_path = self.get_relative_path(event.src_path)
+
+        # 跳过相对路径为 '.' 或空字符串的事件
+        if relative_path in ('', '.'):
+            logging.warning(f"跳过相对路径为 '.' 或空字符串的事件: {event.src_path}")
+            return
+
+        # 检查是否是新增文件或文件夹
+        if relative_path in self.existing_paths:
+            logging.debug(f"路径已存在，不处理: {relative_path}")
+            return
+
+        # 标记为已存在
+        self.existing_paths.add(relative_path)
+        logging.info(f"新增路径: {relative_path}")
+
+        remote_source_path = self.get_remote_source_path(relative_path)  # AList 中的源路径
+        remote_destination_path = self.get_remote_destination_path(relative_path)  # AList 中的目的路径
+
         if event.is_directory:
-            # 创建文件夹
-            remote_dir = self.get_remote_path(event.src_path)
-            success = await self.alist.mkdir(remote_dir)
+            # 对于文件夹，只创建目标文件夹
+            success = await self.alist.mkdir(remote_destination_path)
             if success:
-                print(f"文件夹创建成功: {remote_dir}")
+                logging.info(f"文件夹创建成功: {remote_destination_path}")
             else:
-                print(f"文件夹创建失败: {remote_dir}")
+                logging.error(f"文件夹创建失败或已存在: {remote_destination_path}")
         else:
-            # 上传文件
-            remote_file = self.get_remote_path(event.src_path)
-            success = await self.alist.upload(remote_file, event.src_path)
-            if success:
-                print(f"文件上传成功: {remote_file}")
+            # 文件：先检查文件是否完整，然后复制
+            file_path = event.src_path
+            if await self.is_file_complete(file_path):
+                await self.copy_file(remote_source_path, remote_destination_path)
             else:
-                print(f"文件上传失败: {remote_file}")
+                logging.error(f"文件未完成写入，无法复制: {file_path}")
+
+    async def copy_file(self, remote_source_path, remote_destination_path):
+        """
+        复制文件到 AList
+        在复制之前，先刷新源目录，确保 AList 检测到新增的文件
+        """
+        source_dir = os.path.dirname(remote_source_path)
+        try:
+            # 调用 list_dir 并强制刷新源目录
+            async for _ in self.alist.list_dir(source_dir, refresh=True):
+                pass  # 仅需要执行刷新，无需处理返回的生成器
+            logging.info(f"刷新 AList 中的源路径目录: {source_dir}")
+        except Exception as e:
+            logging.error(f"刷新 AList 中的源路径目录失败: {source_dir}, 错误: {e}")
+            return  # 如果刷新失败，则不进行复制操作
+
+        # 执行复制操作
+        try:
+            # 根据 API 文档，copy 方法的第二个参数应该是目标目录，而不是完整的目标路径
+            destination_dir = os.path.dirname(remote_destination_path)
+            success = await self.alist.copy(remote_source_path, destination_dir)
+            if success:
+                logging.info(f"文件复制成功: {remote_source_path} -> {remote_destination_path}")
+            else:
+                logging.error(f"文件复制失败: {remote_source_path} -> {remote_destination_path}")
+        except Exception as e:
+            logging.error(f"执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
     async def handle_deleted(self, event):
-        remote_path = self.get_remote_path(event.src_path)
+        """
+        处理文件或文件夹的删除事件
+        """
+        relative_path = self.get_relative_path(event.src_path)
+
+        # 跳过相对路径为 '.' 或空字符串的事件
+        if relative_path in ('', '.'):
+            logging.warning(f"跳过相对路径为 '.' 或空字符串的删除事件: {event.src_path}")
+            return
+
+        # 仅处理程序启动后新增的文件或文件夹的删除
+        if relative_path not in self.existing_paths:
+            logging.debug(f"删除事件的路径不在监控范围内，跳过: {relative_path}")
+            return
+
+        if not self.sync_delete:
+            logging.info(f"同步删除功能关闭，忽略删除事件: {relative_path}")
+            return
+
+        remote_destination_path = self.get_remote_destination_path(relative_path)
         if event.is_directory:
-            success = await self.alist.remove_folder(remote_path)
+            success = await self.alist.remove_folder(remote_destination_path)
             if success:
-                print(f"文件夹删除成功: {remote_path}")
+                logging.info(f"文件夹删除成功: {remote_destination_path}")
             else:
-                print(f"文件夹删除失败: {remote_path}")
+                logging.error(f"文件夹删除失败: {remote_destination_path}")
         else:
-            success = await self.alist.remove(remote_path)
+            success = await self.alist.remove(remote_destination_path)
             if success:
-                print(f"文件删除成功: {remote_path}")
+                logging.info(f"文件删除成功: {remote_destination_path}")
             else:
-                print(f"文件删除失败: {remote_path}")
+                logging.error(f"文件删除失败: {remote_destination_path}")
+
+        # 从 existing_paths 中移除
+        self.existing_paths.discard(relative_path)
+        logging.debug(f"从 existing_paths 中移除: {relative_path}")
 
     async def handle_moved(self, event):
-        src_remote = self.get_remote_path(event.src_path)
-        dest_remote = self.get_remote_path(event.dest_path)
-        success = await self.alist.rename(src_remote, dest_remote)
-        if success:
-            print(f"重命名成功: {src_remote} -> {dest_remote}")
-        else:
-            print(f"重命名失败: {src_remote} -> {dest_remote}")
+        """
+        处理文件或文件夹的移动事件
+        """
+        relative_src_path = self.get_relative_path(event.src_path)
+        relative_dst_path = self.get_relative_path(event.dest_path)
+
+        # 跳过相对路径为 '.' 或空字符串的事件
+        if relative_src_path in ('', '.') or relative_dst_path in ('', '.'):
+            logging.warning(f"跳过相对路径为 '.' 或空字符串的移动事件: {event.src_path} -> {event.dest_path}")
+            return
+
+        src_in_existing = relative_src_path in self.existing_paths
+        dst_in_existing = relative_dst_path in self.existing_paths
+
+        if src_in_existing and not dst_in_existing:
+            # 文件/文件夹被移动出监控目录
+            if self.sync_delete:
+                remote_src_path = self.get_remote_destination_path(relative_src_path)
+                if event.is_directory:
+                    success = await self.alist.remove_folder(remote_src_path)
+                    if success:
+                        logging.info(f"文件夹移动删除成功: {remote_src_path}")
+                    else:
+                        logging.error(f"文件夹移动删除失败: {remote_src_path}")
+                else:
+                    success = await self.alist.remove(remote_src_path)
+                    if success:
+                        logging.info(f"文件移动删除成功: {remote_src_path}")
+                    else:
+                        logging.error(f"文件移动删除失败: {remote_src_path}")
+            # 从 existing_paths 中移除
+            self.existing_paths.discard(relative_src_path)
+            logging.debug(f"从 existing_paths 中移除源路径: {relative_src_path}")
+
+        if not src_in_existing and dst_in_existing:
+            # 文件/文件夹被移动到监控目录
+            remote_src_path = self.get_remote_source_path(relative_dst_path)
+            remote_dst_path = self.get_remote_destination_path(relative_dst_path)
+            success = await self.alist.rename(remote_src_path, remote_dst_path)
+            if success:
+                logging.info(f"重命名成功: {remote_src_path} -> {remote_dst_path}")
+            else:
+                logging.error(f"重命名失败: {remote_src_path} -> {remote_dst_path}")
+            # 添加到 existing_paths
+            self.existing_paths.add(relative_dst_path)
+            logging.debug(f"添加到 existing_paths: {relative_dst_path}")
+
+        if src_in_existing and dst_in_existing:
+            # 文件/文件夹在监控目录内被重命名
+            remote_src_path = self.get_remote_destination_path(relative_src_path)
+            remote_dst_path = self.get_remote_destination_path(relative_dst_path)
+            success = await self.alist.rename(remote_src_path, remote_dst_path)
+            if success:
+                logging.info(f"重命名成功: {remote_src_path} -> {remote_dst_path}")
+            else:
+                logging.error(f"重命名失败: {remote_src_path} -> {remote_dst_path}")
+            # 更新 existing_paths
+            self.existing_paths.discard(relative_src_path)
+            self.existing_paths.add(relative_dst_path)
+            logging.debug(f"更新 existing_paths: {relative_src_path} -> {relative_dst_path}")
 
     def on_created(self, event):
-        asyncio.run_coroutine_threadsafe(self.handle_created_or_modified(event), self.loop)
+        """
+        Watchdog 回调：文件或文件夹被创建
+        """
+        file_path = event.src_path
+        coro = self.handle_created_or_modified(event)
+        # 使用线程安全的方法调度任务
+        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        logging.debug(f"接收到创建事件: {file_path}")
 
     def on_modified(self, event):
-        asyncio.run_coroutine_threadsafe(self.handle_created_or_modified(event), self.loop)
+        """
+        Watchdog 回调：文件或文件夹被修改
+        """
+        file_path = event.src_path
+        coro = self.handle_created_or_modified(event)
+        # 使用线程安全的方法调度任务
+        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        logging.debug(f"接收到修改事件: {file_path}")
 
     def on_deleted(self, event):
-        asyncio.run_coroutine_threadsafe(self.handle_deleted(event), self.loop)
+        """
+        Watchdog 回调：文件或文件夹被删除
+        """
+        file_path = event.src_path
+        coro = self.handle_deleted(event)
+        # 使用线程安全的方法调度任务
+        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        logging.debug(f"接收到删除事件: {file_path}")
 
     def on_moved(self, event):
-        asyncio.run_coroutine_threadsafe(self.handle_moved(event), self.loop)
+        """
+        Watchdog 回调：文件或文件夹被移动
+        """
+        file_path = event.src_path  # 使用源路径作为键
+        coro = self.handle_moved(event)
+        # 使用线程安全的方法调度任务
+        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        logging.debug(f"接收到移动事件: {file_path} -> {event.dest_path}")
+
 
 async def main():
-    # 配置参数
-    endpoint = "https://your-alist-endpoint.com"  # AList 服务器地址
-    username = "your_username"  # AList 用户名
-    password = "your_password"  # AList 密码
-    local_directory = "/path/on/"  # 本地监控目录
-    remote_directory = "/path/on/alist"  # AList 服务器上的目标目录
+    # 从环境变量读取配置
+    endpoint = os.getenv("ALIST_ENDPOINT")
+    username = os.getenv("ALIST_USERNAME")
+    password_file = os.getenv("ALIST_PASSWORD_FILE", "/config/secrets/alist_password.txt")
+    source_base_directory = os.getenv("ALIST_SOURCE_BASE_DIRECTORY")
+    remote_base_directory = os.getenv("ALIST_REMOTE_BASE_DIRECTORY")
+    local_directory = os.getenv("LOCAL_DIRECTORY")
+    log_file = os.getenv("LOG_FILE", "/config/logs/sync_to_alist.log")  # 更新为新的日志路径
+    sync_delete_env = os.getenv("SYNC_DELETE", "false").lower()
+    sync_delete = sync_delete_env == "true"
+
+    # 检查必需的环境变量是否存在
+    required_env_vars = [
+        "ALIST_ENDPOINT",
+        "ALIST_USERNAME",
+        "ALIST_SOURCE_BASE_DIRECTORY",
+        "ALIST_REMOTE_BASE_DIRECTORY",
+        "LOCAL_DIRECTORY"
+    ]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        print(f"缺少必要的环境变量: {', '.join(missing_vars)}")
+        logging.error(f"缺少必要的环境变量: {', '.join(missing_vars)}")
+        return
+
+    # 读取密码
+    if not os.path.exists(password_file):
+        print(f"密码文件 {password_file} 不存在。")
+        logging.error(f"密码文件 {password_file} 不存在。")
+        return
+    with open(password_file, "r") as f:
+        password = f.read().strip()
+
+    # 确保日志目录存在
+    log_dir = os.path.dirname(log_file)
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    logging.info("日志配置完成。")
 
     # 初始化 AList 实例
     alist = AList(endpoint=endpoint)
     user = AListUser(username=username, rawpwd=password)
     login_success = await alist.login(user)
     if not login_success:
-        print("登录失败，请检查用户名和密码。")
+        logging.error("登录失败，请检查用户名和密码。")
         return
-    print("登录成功。")
+    logging.info("登录成功。")
 
     # 获取当前事件循环
     loop = asyncio.get_running_loop()
 
     # 初始化事件处理器
-    event_handler = AListSyncHandler(alist, remote_directory, local_directory, loop)
+    event_handler = AListSyncHandler(
+        alist=alist,
+        remote_base_path=remote_base_directory,
+        local_base_path=local_directory,
+        loop=loop,
+        source_base_directory=source_base_directory,
+        debounce_delay=1.0,  # 设置防抖延迟时间为1秒
+        sync_delete=sync_delete,  # 同步删除开关
+        file_stable_time=5.0  # 设置文件稳定时间为5秒
+    )
 
     # 设置观察者
     observer = Observer()
     observer.schedule(event_handler, path=local_directory, recursive=True)
     observer.start()
-    print(f"开始监控本地目录: {local_directory}")
+    logging.info(f"开始监控本地目录: {local_directory}")
+    logging.info(f"同步删除功能 {'启用' if sync_delete else '禁用'}。")
 
     try:
         while True:
             await asyncio.sleep(1)  # 保持主线程运行
     except KeyboardInterrupt:
         observer.stop()
+        logging.info("停止监控。")
     observer.join()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
