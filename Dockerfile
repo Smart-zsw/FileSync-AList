@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
-COPY sync_manager.py .
+COPY filesync-alist.py .
 
 # 复制配置文件到工作目录的 /config 目录
 COPY config.yaml /config/config.yaml
@@ -26,4 +26,4 @@ ENV TZ="Asia/Shanghai"
 RUN mkdir -p /config/logs
 
 # 定义容器启动时执行的命令
-CMD ["python", "sync_manager.py"]
+CMD ["python", "filesync-alist.py"]

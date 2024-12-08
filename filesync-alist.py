@@ -435,7 +435,7 @@ class SyncHandler(FileSystemEventHandler):
     def handle_file_event(self, event, relative_path):
         """处理文件的创建、修改或删除"""
         if self.is_ignored_file(relative_path):
-            self.logger.info(f"跳过: 忽略文件类型: {relative_path}")
+            # self.logger.info(f"跳过: 忽略文件类型: {relative_path}")
             return
 
         if event.event_type in ['created', 'modified']:
