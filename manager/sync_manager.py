@@ -13,6 +13,9 @@ import time
 import threading
 from collections import defaultdict
 
+# 定义全局的忽略路径集合
+ignore_paths = set()
+
 # 读取配置文件
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -55,7 +58,8 @@ class AListSyncHandler(FileSystemEventHandler):
             source_base_directory: str,
             debounce_delay: float = 1.0,
             sync_delete: bool = False,
-            file_stable_time: float = 5.0  # 新增：文件稳定时间（秒）
+            file_stable_time: float = 5.0,  # 新增：文件稳定时间（秒）
+            ignore_paths: set = None  # 新增：可选的忽略路径集合
     ):
         super().__init__()
         self.logger = logging.getLogger('AListSync')
@@ -70,18 +74,22 @@ class AListSyncHandler(FileSystemEventHandler):
         self._tasks = {}  # 跟踪文件路径到任务的映射
         self.existing_paths = set()  # 存储启动时已有的文件和文件夹的相对路径
 
-        # 初始化 existing_paths，遍历本地目录并记录所有现有文件和文件夹
-        for root, dirs, files in os.walk(self.local_base_path):
-            rel_root = os.path.relpath(root, self.local_base_path).replace("\\", "/")
-            if rel_root == ".":
-                rel_root = ""
-            for d in dirs:
-                path = os.path.join(rel_root, d).replace("\\", "/")
-                self.existing_paths.add(path)
-            for f in files:
-                path = os.path.join(rel_root, f).replace("\\", "/")
-                self.existing_paths.add(path)
-        self.logger.info(f"已记录 {len(self.existing_paths)} 个现有路径，不会监控这些路径。")
+        if ignore_paths is not None:
+            self.existing_paths = set(ignore_paths)
+            self.logger.info(f"使用外部提供的忽略路径，共计 {len(self.existing_paths)} 个路径。")
+        else:
+            # 初始化 existing_paths，遍历本地目录并记录所有现有文件和文件夹
+            for root, dirs, files in os.walk(self.local_base_path):
+                rel_root = os.path.relpath(root, self.local_base_path).replace("\\", "/")
+                if rel_root == ".":
+                    rel_root = ""
+                for d in dirs:
+                    path = os.path.join(rel_root, d).replace("\\", "/")
+                    self.existing_paths.add(path)
+                for f in files:
+                    path = os.path.join(rel_root, f).replace("\\", "/")
+                    self.existing_paths.add(path)
+            self.logger.info(f"已记录 {len(self.existing_paths)} 个现有路径，不会监控这些路径。")
 
     def get_relative_path(self, src_path):
         """
@@ -528,6 +536,7 @@ class SyncHandler(FileSystemEventHandler):
                     self.logger.error(f"错误: 无法删除 .strm 文件: {strm_file_path}, {e}")
 
 async def main():
+    global ignore_paths  # 声明使用全局变量
     # 初始化 AList 实例
     alist_config = config['alist']
     alist = AList(endpoint=alist_config['endpoint'])
@@ -541,29 +550,13 @@ async def main():
     # 获取当前事件循环
     loop = asyncio.get_running_loop()
 
-    # 初始化 AListSyncHandler
-    alist_sync_handler = AListSyncHandler(
-        alist=alist,
-        remote_base_path=alist_config['remote_base_directory'],
-        local_base_path=alist_config['local_directory'],
-        loop=loop,
-        source_base_directory=alist_config['source_base_directory'],
-        debounce_delay=1.0,  # 设置防抖延迟时间为1秒
-        sync_delete=alist_config.get('sync_delete', False),  # 同步删除开关
-        file_stable_time=5.0  # 设置文件稳定时间为5秒
-    )
-
-    # 设置 AList 观察者
-    alist_observer = Observer()
-    alist_observer.schedule(alist_sync_handler, path=alist_config['local_directory'], recursive=True)
-    alist_observer.start()
-    logger.info(f"开始监控 AList 本地目录: {alist_config['local_directory']}")
-    logger.info(f"同步删除功能 {'启用' if alist_config.get('sync_delete', False) else '禁用'}。")
-
     # 设置同步任务处理器
     sync_config = config['sync']
     sync_handlers = []
     observers = []
+
+    # 检查是否启用全量同步
+    full_sync = sync_config.get('full_sync_on_startup', True)
 
     for mapping in sync_config['sync_directories']:
         try:
@@ -580,7 +573,7 @@ async def main():
         sync_handlers.append(event_handler)
 
         # 执行初始全量同步
-        if sync_config.get('full_sync_on_startup', True):
+        if full_sync:
             logger.info(f"执行初始全量同步: {source_dir} -> {target_dir}")
             for root, dirs, files in os.walk(source_dir):
                 relative_root = os.path.relpath(root, source_dir).replace("\\", "/")
@@ -601,11 +594,33 @@ async def main():
                         event_handler.create_strm_file(relative_path)
                     else:
                         event_handler.sync_file(relative_path)
+                    # 收集处理过的路径到 ignore_paths
+                    ignore_paths.add(relative_path)
 
         observer = Observer()
         observer.schedule(event_handler, path=source_dir, recursive=True)
         observer.start()
         observers.append(observer)
+
+    # 初始化 AListSyncHandler，传入 ignore_paths（如果启用全量同步）
+    alist_sync_handler = AListSyncHandler(
+        alist=alist,
+        remote_base_path=alist_config['remote_base_directory'],
+        local_base_path=alist_config['local_directory'],
+        loop=loop,
+        source_base_directory=alist_config['source_base_directory'],
+        debounce_delay=1.0,  # 设置防抖延迟时间为1秒
+        sync_delete=alist_config.get('sync_delete', False),  # 同步删除开关
+        file_stable_time=5.0,  # 设置文件稳定时间为5秒
+        ignore_paths=ignore_paths if full_sync else None  # 传入忽略路径
+    )
+
+    # 设置 AList 观察者
+    alist_observer = Observer()
+    alist_observer.schedule(alist_sync_handler, path=alist_config['local_directory'], recursive=True)
+    alist_observer.start()
+    logger.info(f"开始监控 AList 本地目录: {alist_config['local_directory']}")
+    logger.info(f"同步删除功能 {'启用' if alist_config.get('sync_delete', False) else '禁用'}。")
 
     try:
         while True:

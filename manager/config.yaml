@@ -1,0 +1,46 @@
+# config.yaml
+
+alist:
+  endpoint: "http://your-alist-endpoint"
+  username: "your-username"
+  password: "your-secure-password"
+  source_base_directory: "/path/to/source"
+  remote_base_directory: "/path/to/remote"
+  local_directory: "/path/to/local"
+  sync_delete: false
+
+sync:
+  sync_directories:
+    - source_dir: "/path/to/source1"
+      target_dir: "/path/to/target1"
+      media_prefix: "prefix1"
+    - source_dir: "/path/to/source2"
+      target_dir: "/path/to/target2"
+      media_prefix: "prefix2"
+  media_file_types:
+    - "*.mp4"
+    - "*.mkv"
+    - "*.ts"
+    - "*.iso"
+    - "*.rmvb"
+    - "*.avi"
+    - "*.mov"
+    - "*.mpeg"
+    - "*.mpg"
+    - "*.wmv"
+    - "*.3gp"
+    - "*.asf"
+    - "*.m4v"
+    - "*.flv"
+    - "*.m2ts"
+    - "*.strm"
+    - "*.tp"
+    - "*.f4v"
+  ignore_file_types:
+    - ".mp"
+  overwrite_existing: false
+  enable_cleanup: false
+  full_sync_on_startup: true
+  use_direct_link: false
+  base_url: "http://your-base-url"
+  debounce_delay: 120  # 延迟时间（秒）
