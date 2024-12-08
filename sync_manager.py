@@ -7,14 +7,9 @@ from watchdog.events import FileSystemEventHandler
 from alist import AList, AListUser
 import yaml
 import shutil
-import datetime
 import re
-import time
 import threading
 from collections import defaultdict
-
-# 定义全局的忽略路径集合
-ignore_paths = set()
 
 # 读取配置文件
 def load_config(config_path):
@@ -40,12 +35,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('SyncManager')
 logger.info("日志配置完成。")
-
-# 读取 AList 密码
-password = config['alist'].get('password', '')
-if not password:
-    logger.error("配置文件中缺少 'alist.password' 字段。")
-    exit(1)
 
 # 定义 AListSyncHandler 类
 class AListSyncHandler(FileSystemEventHandler):
@@ -379,23 +368,24 @@ class AListSyncHandler(FileSystemEventHandler):
         self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
         self.logger.debug(f"接收到移动事件: {file_path} -> {event.dest_path}")
 
+# 定义 SyncHandler 类
 class SyncHandler(FileSystemEventHandler):
-    def __init__(self, source_dir, target_dir, media_prefix):
+    def __init__(self, source_dir, target_dir, media_prefix, sync_config):
         super().__init__()
         self.logger = logging.getLogger('StrmSync')
         self.source_dir = source_dir
         self.target_dir = target_dir
         self.media_prefix = media_prefix
         self.debounce_timers = defaultdict(threading.Timer)
-        # 从环境变量读取 debounce_delay 和其他配置
-        self.debounce_delay = float(os.getenv('DEBOUNCE_DELAY', 120))  # 延迟时间（秒）
-        self.media_file_types = config['sync'].get('media_file_types', ["*.mp4", "*.mkv"])
-        self.ignore_file_types = config['sync'].get('ignore_file_types', ['.mp'])
-        self.overwrite_existing = config['sync'].get('overwrite_existing', False)
-        self.enable_cleanup = config['sync'].get('enable_cleanup', False)
-        self.full_sync_on_startup = config['sync'].get('full_sync_on_startup', True)
-        self.use_direct_link = config['sync'].get('use_direct_link', False)
-        self.base_url = config['sync'].get('base_url', '')
+        # 从配置文件读取 debounce_delay 和其他配置
+        self.debounce_delay = sync_config.get('debounce_delay', 120)  # 延迟时间（秒）
+        self.media_file_types = sync_config.get('media_file_types', ["*.mp4", "*.mkv"])
+        self.ignore_file_types = sync_config.get('ignore_file_types', ['.mp'])
+        self.overwrite_existing = sync_config.get('overwrite_existing', False)
+        self.enable_cleanup = sync_config.get('enable_cleanup', False)
+        self.full_sync_on_startup = sync_config.get('full_sync_on_startup', True)
+        self.use_direct_link = sync_config.get('use_direct_link', False)
+        self.base_url = sync_config.get('base_url', '')
 
     def get_relative_path(self, full_path):
         return os.path.relpath(full_path, self.source_dir).replace("\\", "/")
@@ -536,45 +526,63 @@ class SyncHandler(FileSystemEventHandler):
                     self.logger.error(f"错误: 无法删除 .strm 文件: {strm_file_path}, {e}")
 
 async def main():
-    global ignore_paths  # 声明使用全局变量
-    # 初始化 AList 实例
-    alist_config = config['alist']
-    alist = AList(endpoint=alist_config['endpoint'])
-    user = AListUser(username=alist_config['username'], rawpwd=password)
-    login_success = await alist.login(user)
-    if not login_success:
-        logger.error("登录失败，请检查用户名和密码。")
-        return
-    logger.info("登录成功。")
-
     # 获取当前事件循环
     loop = asyncio.get_running_loop()
 
+    # 获取同步全局配置
+    sync_config = config.get('sync', {})
+
+    # 获取 alist 配置列表
+    source_base_directories = config['alist'].get('source_base_directories', [])
+    remote_base_directories = config['alist'].get('remote_base_directories', [])
+    local_directories = config['alist'].get('local_directories', [])
+    sync_delete = config['alist'].get('sync_delete', False)
+
+    # 获取 sync_directories 列表
+    sync_directories = sync_config.get('sync_directories', [])
+
+    # 确保 base directories 的数量与 sync_directories 相同
+    if not (len(source_base_directories) == len(remote_base_directories) == len(local_directories) == len(sync_directories)):
+        logger.error("配置错误: 'source_base_directories', 'remote_base_directories', 'local_directories' 和 'sync_directories' 的长度必须相同。")
+        return
+
     # 设置同步任务处理器
-    sync_config = config['sync']
-    sync_handlers = []
     observers = []
 
-    # 检查是否启用全量同步
-    full_sync = sync_config.get('full_sync_on_startup', True)
+    for index in range(len(sync_directories)):
+        alist_config = {
+            'endpoint': config['alist']['endpoint'],
+            'username': config['alist']['username'],
+            'password': config['alist']['password'],
+            'source_base_directory': source_base_directories[index],
+            'remote_base_directory': remote_base_directories[index],
+            'local_directory': local_directories[index],
+            'sync_delete': sync_delete
+        }
 
-    for mapping in sync_config['sync_directories']:
-        try:
-            source_dir = mapping['source_dir']
-            target_dir = mapping['target_dir']
-            media_prefix = mapping['media_prefix']
-        except KeyError:
-            logger.error(f"配置错误: SYNC_DIRECTORIES 中的映射 {mapping} 缺少必要字段。")
+        mapping = sync_directories[index]
+        source_dir = mapping['source_dir']
+        target_dir = mapping['target_dir']
+        media_prefix = mapping['media_prefix']
+
+        logger.info(f"开始监控目录集 {index + 1}: {source_dir} -> {target_dir} (media 前缀: {media_prefix})")
+
+        # 初始化 AList 实例
+        alist = AList(endpoint=alist_config['endpoint'])
+        user = AListUser(username=alist_config['username'], rawpwd=alist_config['password'])
+        login_success = await alist.login(user)
+        if not login_success:
+            logger.error(f"目录集 {index + 1}: 登录失败，请检查用户名和密码。")
             continue
+        logger.info(f"目录集 {index + 1}: 登录成功。")
 
-        logger.info(f"开始监控目录: {source_dir} -> {target_dir} (media 前缀: {media_prefix})")
+        # 初始化 SyncHandler
+        event_handler = SyncHandler(source_dir, target_dir, media_prefix, sync_config)
 
-        event_handler = SyncHandler(source_dir, target_dir, media_prefix)
-        sync_handlers.append(event_handler)
-
-        # 执行初始全量同步
-        if full_sync:
-            logger.info(f"执行初始全量同步: {source_dir} -> {target_dir}")
+        # 执行初始全量同步并收集 ignore_paths_per_task
+        ignore_paths_per_task = set()
+        if sync_config.get('full_sync_on_startup', True):
+            logger.info(f"目录集 {index + 1}: 执行初始全量同步: {source_dir} -> {target_dir}")
             for root, dirs, files in os.walk(source_dir):
                 relative_root = os.path.relpath(root, source_dir).replace("\\", "/")
                 if relative_root == ".":
@@ -584,53 +592,55 @@ async def main():
                 if not os.path.exists(target_root):
                     try:
                         os.makedirs(target_root, exist_ok=True)
-                        logger.info(f"创建目录: {target_root}")
+                        logger.info(f"目录集 {index + 1}: 创建目录: {target_root}")
                     except Exception as e:
-                        logger.error(f"错误: 无法创建目录: {target_root}, {e}")
-
+                        logger.error(f"目录集 {index + 1}: 错误: 无法创建目录: {target_root}, {e}")
                 for file in files:
                     relative_path = os.path.join(relative_root, file).replace("\\", "/")
                     if event_handler.is_media_file(relative_path):
                         event_handler.create_strm_file(relative_path)
                     else:
                         event_handler.sync_file(relative_path)
-                    # 收集处理过的路径到 ignore_paths
-                    ignore_paths.add(relative_path)
+                    # 收集处理过的路径到 ignore_paths_per_task
+                    ignore_paths_per_task.add(relative_path)
 
-        observer = Observer()
-        observer.schedule(event_handler, path=source_dir, recursive=True)
-        observer.start()
-        observers.append(observer)
+        # 初始化 AListSyncHandler，传入 ignore_paths_per_task（如果启用全量同步）
+        alist_sync_handler = AListSyncHandler(
+            alist=alist,
+            remote_base_path=alist_config['remote_base_directory'],
+            local_base_path=alist_config['local_directory'],
+            loop=loop,
+            source_base_directory=alist_config['source_base_directory'],
+            debounce_delay=1.0,  # 设置防抖延迟时间为1秒
+            sync_delete=alist_config.get('sync_delete', False),  # 同步删除开关
+            file_stable_time=5.0,  # 设置文件稳定时间为5秒
+            ignore_paths=ignore_paths_per_task if sync_config.get('full_sync_on_startup', True) else None  # 传入忽略路径
+        )
 
-    # 初始化 AListSyncHandler，传入 ignore_paths（如果启用全量同步）
-    alist_sync_handler = AListSyncHandler(
-        alist=alist,
-        remote_base_path=alist_config['remote_base_directory'],
-        local_base_path=alist_config['local_directory'],
-        loop=loop,
-        source_base_directory=alist_config['source_base_directory'],
-        debounce_delay=1.0,  # 设置防抖延迟时间为1秒
-        sync_delete=alist_config.get('sync_delete', False),  # 同步删除开关
-        file_stable_time=5.0,  # 设置文件稳定时间为5秒
-        ignore_paths=ignore_paths if full_sync else None  # 传入忽略路径
-    )
+        # 设置 AList 观察者
+        alist_observer = Observer()
+        alist_observer.schedule(alist_sync_handler, path=alist_config['local_directory'], recursive=True)
+        alist_observer.start()
+        observers.append(alist_observer)
+        logger.info(f"目录集 {index + 1}: 开始监控 AList 本地目录: {alist_config['local_directory']}")
+        logger.info(f"目录集 {index + 1}: 同步删除功能 {'启用' if alist_config.get('sync_delete', False) else '禁用'}。")
 
-    # 设置 AList 观察者
-    alist_observer = Observer()
-    alist_observer.schedule(alist_sync_handler, path=alist_config['local_directory'], recursive=True)
-    alist_observer.start()
-    logger.info(f"开始监控 AList 本地目录: {alist_config['local_directory']}")
-    logger.info(f"同步删除功能 {'启用' if alist_config.get('sync_delete', False) else '禁用'}。")
+        # 设置 SyncHandler 观察者
+        sync_observer = Observer()
+        sync_observer.schedule(event_handler, path=source_dir, recursive=True)
+        sync_observer.start()
+        observers.append(sync_observer)
+        logger.info(f"目录集 {index + 1}: 开始监控同步目录: {source_dir}")
 
     try:
         while True:
             await asyncio.sleep(1)  # 保持主线程运行
     except KeyboardInterrupt:
         logger.info("========== 停止监控任务 ==========")
-        alist_observer.stop()
+        # 停止所有观察者
         for observer in observers:
             observer.stop()
-        alist_observer.join()
+        # 等待所有观察者线程结束
         for observer in observers:
             observer.join()
 

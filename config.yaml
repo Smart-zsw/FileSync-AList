@@ -4,9 +4,18 @@ alist:
   endpoint: "http://your-alist-endpoint"
   username: "your-username"
   password: "your-secure-password"
-  source_base_directory: "/path/to/source"
-  remote_base_directory: "/path/to/remote"
-  local_directory: "/path/to/local"
+  source_base_directories:
+    - "/path/to/source1_base"
+    - "/path/to/source2_base"
+    # 添加更多的 base directories 如需
+  remote_base_directories:
+    - "/path/to/remote1_base"
+    - "/path/to/remote2_base"
+    # 添加更多的 base directories 如需
+  local_directories:
+    - "/path/to/local1_base"
+    - "/path/to/local2_base"
+    # 添加更多的 base directories 如需
   sync_delete: false
 
 sync:
@@ -17,6 +26,7 @@ sync:
     - source_dir: "/path/to/source2"
       target_dir: "/path/to/target2"
       media_prefix: "prefix2"
+    # 添加更多的同步任务如需
   media_file_types:
     - "*.mp4"
     - "*.mkv"
