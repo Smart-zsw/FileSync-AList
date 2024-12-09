@@ -531,106 +531,132 @@ async def main():
 
     # 获取同步全局配置
     sync_config = config.get('sync', {})
+    alist_config = config.get('alist', {})
 
     # 获取 alist 配置列表
-    source_base_directories = config['alist'].get('source_base_directories', [])
-    remote_base_directories = config['alist'].get('remote_base_directories', [])
-    local_directories = config['alist'].get('local_directories', [])
-    sync_delete = config['alist'].get('sync_delete', False)
+    source_base_directories = alist_config.get('source_base_directories', [])
+    remote_base_directories = alist_config.get('remote_base_directories', [])
+    local_directories = alist_config.get('local_directories', [])
+    sync_delete = alist_config.get('sync_delete', False)
 
     # 获取 sync_directories 列表
     sync_directories = sync_config.get('sync_directories', [])
 
-    # 确保 base directories 的数量与 sync_directories 相同
-    if not (len(source_base_directories) == len(remote_base_directories) == len(local_directories) == len(sync_directories)):
-        logger.error("配置错误: 'source_base_directories', 'remote_base_directories', 'local_directories' 和 'sync_directories' 的长度必须相同。")
-        return
-
-    # 设置同步任务处理器
     observers = []
 
-    for index in range(len(sync_directories)):
-        alist_config = {
-            'endpoint': config['alist']['endpoint'],
-            'username': config['alist']['username'],
-            'password': config['alist']['password'],
-            'source_base_directory': source_base_directories[index],
-            'remote_base_directory': remote_base_directories[index],
-            'local_directory': local_directories[index],
-            'sync_delete': sync_delete
-        }
+    # 初始化 AList 功能（如果配置存在）
+    if alist_config:
+        # 确保 base directories 的数量与 sync_directories 相同
+        if not (len(source_base_directories) == len(remote_base_directories) == len(local_directories)):
+            logger.error("配置错误: 'source_base_directories', 'remote_base_directories' 和 'local_directories' 的长度必须相同。")
+        else:
+            for index in range(len(sync_directories)):
+                # 检查是否有对应的 sync_directory
+                if index >= len(sync_directories):
+                    logger.warning(f"目录集 {index + 1}: 缺少对应的 'sync_directories' 配置，跳过。")
+                    continue
 
-        mapping = sync_directories[index]
-        source_dir = mapping['source_dir']
-        target_dir = mapping['target_dir']
-        media_prefix = mapping['media_prefix']
+                mapping = sync_directories[index]
+                source_dir = mapping.get('source_dir')
+                target_dir = mapping.get('target_dir')
+                media_prefix = mapping.get('media_prefix')
 
-        logger.info(f"开始监控目录集 {index + 1}: {source_dir} -> {target_dir} (media 前缀: {media_prefix})")
+                if not all([source_dir, target_dir, media_prefix]):
+                    logger.warning(f"目录集 {index + 1}: 'sync_directories' 配置不完整，跳过。")
+                    continue
 
-        # 初始化 AList 实例
-        alist = AList(endpoint=alist_config['endpoint'])
-        user = AListUser(username=alist_config['username'], rawpwd=alist_config['password'])
-        login_success = await alist.login(user)
-        if not login_success:
-            logger.error(f"目录集 {index + 1}: 登录失败，请检查用户名和密码。")
-            continue
-        logger.info(f"目录集 {index + 1}: 登录成功。")
+                logger.info(f"开始监控目录集 {index + 1}: {source_dir} -> {target_dir} (media 前缀: {media_prefix})")
 
-        # 初始化 SyncHandler
-        event_handler = SyncHandler(source_dir, target_dir, media_prefix, sync_config)
+                # 初始化 AList 实例
+                alist = AList(endpoint=alist_config['endpoint'])
+                user = AListUser(username=alist_config['username'], rawpwd=alist_config['password'])
+                login_success = await alist.login(user)
+                if not login_success:
+                    logger.error(f"目录集 {index + 1}: 登录失败，请检查用户名和密码。")
+                    continue
+                logger.info(f"目录集 {index + 1}: 登录成功。")
 
-        # 执行初始全量同步并收集 ignore_paths_per_task
-        ignore_paths_per_task = set()
-        if sync_config.get('full_sync_on_startup', True):
-            logger.info(f"目录集 {index + 1}: 执行初始全量同步: {source_dir} -> {target_dir}")
-            for root, dirs, files in os.walk(source_dir):
-                relative_root = os.path.relpath(root, source_dir).replace("\\", "/")
-                if relative_root == ".":
-                    relative_root = ""
-                # 创建目录结构
-                target_root = os.path.join(target_dir, relative_root).replace("\\", "/")
-                if not os.path.exists(target_root):
-                    try:
-                        os.makedirs(target_root, exist_ok=True)
-                        logger.info(f"目录集 {index + 1}: 创建目录: {target_root}")
-                    except Exception as e:
-                        logger.error(f"目录集 {index + 1}: 错误: 无法创建目录: {target_root}, {e}")
-                for file in files:
-                    relative_path = os.path.join(relative_root, file).replace("\\", "/")
-                    if event_handler.is_media_file(relative_path):
-                        event_handler.create_strm_file(relative_path)
-                    else:
-                        event_handler.sync_file(relative_path)
-                    # 收集处理过的路径到 ignore_paths_per_task
-                    ignore_paths_per_task.add(relative_path)
+                # 初始化 SyncHandler
+                event_handler = SyncHandler(source_dir, target_dir, media_prefix, sync_config)
 
-        # 初始化 AListSyncHandler，传入 ignore_paths_per_task（如果启用全量同步）
-        alist_sync_handler = AListSyncHandler(
-            alist=alist,
-            remote_base_path=alist_config['remote_base_directory'],
-            local_base_path=alist_config['local_directory'],
-            loop=loop,
-            source_base_directory=alist_config['source_base_directory'],
-            debounce_delay=1.0,  # 设置防抖延迟时间为1秒
-            sync_delete=alist_config.get('sync_delete', False),  # 同步删除开关
-            file_stable_time=5.0,  # 设置文件稳定时间为5秒
-            ignore_paths=ignore_paths_per_task if sync_config.get('full_sync_on_startup', True) else None  # 传入忽略路径
-        )
+                # 执行初始全量同步并收集 ignore_paths_per_task
+                ignore_paths_per_task = set()
+                if sync_config.get('full_sync_on_startup', True):
+                    logger.info(f"目录集 {index + 1}: 执行初始全量同步: {source_dir} -> {target_dir}")
+                    for root, dirs, files in os.walk(source_dir):
+                        relative_root = os.path.relpath(root, source_dir).replace("\\", "/")
+                        if relative_root == ".":
+                            relative_root = ""
+                        # 创建目录结构
+                        target_root = os.path.join(target_dir, relative_root).replace("\\", "/")
+                        if not os.path.exists(target_root):
+                            try:
+                                os.makedirs(target_root, exist_ok=True)
+                                logger.info(f"目录集 {index + 1}: 创建目录: {target_root}")
+                            except Exception as e:
+                                logger.error(f"目录集 {index + 1}: 错误: 无法创建目录: {target_root}, {e}")
+                        for file in files:
+                            relative_path = os.path.join(relative_root, file).replace("\\", "/")
+                            if event_handler.is_media_file(relative_path):
+                                event_handler.create_strm_file(relative_path)
+                            else:
+                                event_handler.sync_file(relative_path)
+                            # 收集处理过的路径到 ignore_paths_per_task
+                            ignore_paths_per_task.add(relative_path)
 
-        # 设置 AList 观察者
-        alist_observer = Observer()
-        alist_observer.schedule(alist_sync_handler, path=alist_config['local_directory'], recursive=True)
-        alist_observer.start()
-        observers.append(alist_observer)
-        logger.info(f"目录集 {index + 1}: 开始监控 AList 本地目录: {alist_config['local_directory']}")
-        logger.info(f"目录集 {index + 1}: 同步删除功能 {'启用' if alist_config.get('sync_delete', False) else '禁用'}。")
+                # 初始化 AListSyncHandler，传入 ignore_paths_per_task（如果启用全量同步）
+                alist_sync_handler = AListSyncHandler(
+                    alist=alist,
+                    remote_base_path=remote_base_directories[index],
+                    local_base_path=local_directories[index],
+                    loop=loop,
+                    source_base_directory=source_base_directories[index],
+                    debounce_delay=1.0,  # 设置防抖延迟时间为1秒
+                    sync_delete=sync_delete,  # 同步删除开关
+                    file_stable_time=5.0,  # 设置文件稳定时间为5秒
+                    ignore_paths=ignore_paths_per_task if sync_config.get('full_sync_on_startup', True) else None  # 传入忽略路径
+                )
 
-        # 设置 SyncHandler 观察者
-        sync_observer = Observer()
-        sync_observer.schedule(event_handler, path=source_dir, recursive=True)
-        sync_observer.start()
-        observers.append(sync_observer)
-        logger.info(f"目录集 {index + 1}: 开始监控同步目录: {source_dir}")
+                # 设置 AList 观察者
+                alist_observer = Observer()
+                alist_observer.schedule(alist_sync_handler, path=local_directories[index], recursive=True)
+                alist_observer.start()
+                observers.append(alist_observer)
+                logger.info(f"目录集 {index + 1}: 开始监控 AList 本地目录: {local_directories[index]}")
+                logger.info(f"目录集 {index + 1}: 同步删除功能 {'启用' if sync_delete else '禁用'}。")
+
+                # 设置 SyncHandler 观察者
+                sync_observer = Observer()
+                sync_observer.schedule(event_handler, path=source_dir, recursive=True)
+                sync_observer.start()
+                observers.append(sync_observer)
+                logger.info(f"目录集 {index + 1}: 开始监控同步目录: {source_dir}")
+
+    # 初始化 Sync 功能（如果配置存在）
+    if sync_config:
+        # 获取 sync_directories 列表
+        sync_directories = sync_config.get('sync_directories', [])
+
+        for index, mapping in enumerate(sync_directories, start=1):
+            source_dir = mapping.get('source_dir')
+            target_dir = mapping.get('target_dir')
+            media_prefix = mapping.get('media_prefix')
+
+            if not all([source_dir, target_dir, media_prefix]):
+                logger.warning(f"同步任务 {index}: 'sync_directories' 配置不完整，跳过。")
+                continue
+
+            logger.info(f"开始监控同步任务 {index}: {source_dir} -> {target_dir} (media 前缀: {media_prefix})")
+
+            # 初始化 SyncHandler
+            event_handler = SyncHandler(source_dir, target_dir, media_prefix, sync_config)
+
+            # 设置 SyncHandler 观察者
+            sync_observer = Observer()
+            sync_observer.schedule(event_handler, path=source_dir, recursive=True)
+            sync_observer.start()
+            observers.append(sync_observer)
+            logger.info(f"同步任务 {index}: 开始监控同步目录: {source_dir}")
 
     try:
         while True:
