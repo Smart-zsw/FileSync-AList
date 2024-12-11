@@ -46,7 +46,6 @@ class AListSyncHandler(FileSystemEventHandler):
             loop: asyncio.AbstractEventLoop,
             source_base_directory: str,
             debounce_delay: float = 1.0,
-            sync_delete: bool = False,
             file_stable_time: float = 5.0,  # 新增：文件稳定时间（秒）
             ignore_paths: set = None  # 新增：可选的忽略路径集合
     ):
@@ -58,7 +57,6 @@ class AListSyncHandler(FileSystemEventHandler):
         self.loop = loop  # 主线程的事件循环
         self.source_base_directory = source_base_directory.rstrip('/')
         self.debounce_delay = debounce_delay  # 防抖延迟时间（秒）
-        self.sync_delete = sync_delete  # 同步删除开关
         self.file_stable_time = file_stable_time  # 文件稳定时间（秒）
         self._tasks = {}  # 跟踪文件路径到任务的映射
         self.existing_paths = set()  # 存储启动时已有的文件和文件夹的相对路径
@@ -151,18 +149,6 @@ class AListSyncHandler(FileSystemEventHandler):
                 previous_size = current_size
             await asyncio.sleep(check_interval)
 
-    def schedule_complete_task(self, coro, file_path):
-        """
-        调度一个完整性检查后的任务
-        """
-        if file_path in self._tasks:
-            task = self._tasks[file_path]
-            task.cancel()
-            self.logger.debug(f"取消之前的完整性检查任务: {file_path}")
-        future = asyncio.run_coroutine_threadsafe(self.debounce(coro, file_path), self.loop)
-        self._tasks[file_path] = future
-        self.logger.debug(f"调度完整性检查后的新任务: {file_path}")
-
     async def handle_created_or_modified(self, event):
         """
         处理文件或文件夹的创建和修改事件
@@ -228,44 +214,6 @@ class AListSyncHandler(FileSystemEventHandler):
         except Exception as e:
             self.logger.error(f"执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
-    async def handle_deleted(self, event):
-        """
-        处理文件或文件夹的删除事件
-        """
-        relative_path = self.get_relative_path(event.src_path)
-
-        # 跳过相对路径为 '.' 或空字符串的事件
-        if relative_path in ('', '.'):
-            self.logger.warning(f"跳过相对路径为 '.' 或空字符串的删除事件: {event.src_path}")
-            return
-
-        # 仅处理程序启动后新增的文件或文件夹的删除
-        if relative_path not in self.existing_paths:
-            self.logger.debug(f"删除事件的路径不在监控范围内，跳过: {relative_path}")
-            return
-
-        if not self.sync_delete:
-            self.logger.info(f"同步删除功能关闭，忽略删除事件: {relative_path}")
-            return
-
-        remote_destination_path = self.get_remote_destination_path(relative_path)
-        if event.is_directory:
-            success = await self.alist.remove_folder(remote_destination_path)
-            if success:
-                self.logger.info(f"文件夹删除成功: {remote_destination_path}")
-            else:
-                self.logger.error(f"文件夹删除失败: {remote_destination_path}")
-        else:
-            success = await self.alist.remove(remote_destination_path)
-            if success:
-                self.logger.info(f"文件删除成功: {remote_destination_path}")
-            else:
-                self.logger.error(f"文件删除失败: {remote_destination_path}")
-
-        # 从 existing_paths 中移除
-        self.existing_paths.discard(relative_path)
-        self.logger.debug(f"从 existing_paths 中移除: {relative_path}")
-
     async def handle_moved(self, event):
         """
         处理文件或文件夹的移动事件
@@ -283,20 +231,6 @@ class AListSyncHandler(FileSystemEventHandler):
 
         if src_in_existing and not dst_in_existing:
             # 文件/文件夹被移动出监控目录
-            if self.sync_delete:
-                remote_src_path = self.get_remote_destination_path(relative_src_path)
-                if event.is_directory:
-                    success = await self.alist.remove_folder(remote_src_path)
-                    if success:
-                        self.logger.info(f"文件夹移动删除成功: {remote_src_path}")
-                    else:
-                        self.logger.error(f"文件夹移动删除失败: {remote_src_path}")
-                else:
-                    success = await self.alist.remove(remote_src_path)
-                    if success:
-                        self.logger.info(f"文件移动删除成功: {remote_src_path}")
-                    else:
-                        self.logger.error(f"文件移动删除失败: {remote_src_path}")
             # 从 existing_paths 中移除
             self.existing_paths.discard(relative_src_path)
             self.logger.debug(f"从 existing_paths 中移除源路径: {relative_src_path}")
@@ -347,16 +281,6 @@ class AListSyncHandler(FileSystemEventHandler):
         # 使用线程安全的方法调度任务
         self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
         self.logger.debug(f"接收到修改事件: {file_path}")
-
-    def on_deleted(self, event):
-        """
-        Watchdog 回调：文件或文件夹被删除
-        """
-        file_path = event.src_path
-        coro = self.handle_deleted(event)
-        # 使用线程安全的方法调度任务
-        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
-        self.logger.debug(f"接收到删除事件: {file_path}")
 
     def on_moved(self, event):
         """
@@ -537,7 +461,6 @@ async def main():
     source_base_directories = alist_config.get('source_base_directories', [])
     remote_base_directories = alist_config.get('remote_base_directories', [])
     local_directories = alist_config.get('local_directories', [])
-    sync_delete = alist_config.get('sync_delete', False)
 
     # 获取 sync_directories 列表
     sync_directories = sync_config.get('sync_directories', [])
@@ -612,7 +535,6 @@ async def main():
                     loop=loop,
                     source_base_directory=source_base_directories[index],
                     debounce_delay=1.0,  # 设置防抖延迟时间为1秒
-                    sync_delete=sync_delete,  # 同步删除开关
                     file_stable_time=5.0,  # 设置文件稳定时间为5秒
                     ignore_paths=ignore_paths_per_task if sync_config.get('full_sync_on_startup', True) else None  # 传入忽略路径
                 )
@@ -623,7 +545,6 @@ async def main():
                 alist_observer.start()
                 observers.append(alist_observer)
                 logger.info(f"目录集 {index + 1}: 开始监控 AList 本地目录: {local_directories[index]}")
-                logger.info(f"目录集 {index + 1}: 同步删除功能 {'启用' if sync_delete else '禁用'}。")
 
                 # 设置 SyncHandler 观察者
                 sync_observer = Observer()
