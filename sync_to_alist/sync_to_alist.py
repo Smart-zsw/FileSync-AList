@@ -45,6 +45,12 @@ class AListSyncHandler(FileSystemEventHandler):
                 self.existing_paths.add(path)
         logging.info(f"已记录 {len(self.existing_paths)} 个现有路径，不会监控这些路径。")
 
+    def should_ignore_file(self, file_path):
+        """
+        判断文件是否是以 .mp 结尾的文件，若是则忽略。
+        """
+        return file_path.endswith(".mp")
+
     def get_relative_path(self, src_path):
         """
         计算相对于本地监控基路径的相对路径
@@ -108,7 +114,7 @@ class AListSyncHandler(FileSystemEventHandler):
                 stable_time += check_interval
                 logging.debug(f"文件大小未变化，稳定时间: {stable_time:.1f}/{self.file_stable_time} 秒")
                 if stable_time >= self.file_stable_time:
-                    logging.info(f"文件已完成写入: {file_path}")
+                    # logging.info(f"文件已完成写入: {file_path}")
                     return True
             else:
                 stable_time = 0.0
@@ -137,6 +143,11 @@ class AListSyncHandler(FileSystemEventHandler):
         # 跳过相对路径为 '.' 或空字符串的事件
         if relative_path in ('', '.'):
             logging.warning(f"跳过相对路径为 '.' 或空字符串的事件: {event.src_path}")
+            return
+
+        # 跳过 .mp 文件
+        if self.should_ignore_file(relative_path):
+            # logging.warning(f"跳过 .mp 文件: {event.src_path}")
             return
 
         # 检查是否是新增文件或文件夹
@@ -176,7 +187,7 @@ class AListSyncHandler(FileSystemEventHandler):
             # 调用 list_dir 并强制刷新源目录
             async for _ in self.alist.list_dir(source_dir, refresh=True):
                 pass  # 仅需要执行刷新，无需处理返回的生成器
-            logging.info(f"刷新 AList 中的源路径目录: {source_dir}")
+            # logging.info(f"刷新 AList 中的源路径目录: {source_dir}")
         except Exception as e:
             logging.error(f"刷新 AList 中的源路径目录失败: {source_dir}, 错误: {e}")
             return  # 如果刷新失败，则不进行复制操作
@@ -202,6 +213,11 @@ class AListSyncHandler(FileSystemEventHandler):
         # 跳过相对路径为 '.' 或空字符串的事件
         if relative_path in ('', '.'):
             logging.warning(f"跳过相对路径为 '.' 或空字符串的删除事件: {event.src_path}")
+            return
+
+        # 跳过 .mp 文件
+        if self.should_ignore_file(relative_path):
+            # logging.warning(f"跳过 .mp 文件: {event.src_path}")
             return
 
         # 仅处理程序启动后新增的文件或文件夹的删除
