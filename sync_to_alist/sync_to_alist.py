@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import os
 import logging
 from logging.handlers import RotatingFileHandler
@@ -297,9 +298,9 @@ class AListSyncHandler(FileSystemEventHandler):
         Watchdog 回调：文件或文件夹被创建
         """
         file_path = event.src_path
-        coro = self.handle_created_or_modified(event)
-        # 使用线程安全的方法调度任务
-        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        # 使用 asyncio.run_coroutine_threadsafe 调度协程
+        coro = functools.partial(self.handle_created_or_modified, event)
+        asyncio.run_coroutine_threadsafe(coro(), self.loop)  # 通过主线程的事件循环调度
         logging.debug(f"接收到创建事件: {file_path}")
 
     def on_modified(self, event):
@@ -307,9 +308,9 @@ class AListSyncHandler(FileSystemEventHandler):
         Watchdog 回调：文件或文件夹被修改
         """
         file_path = event.src_path
-        coro = self.handle_created_or_modified(event)
-        # 使用线程安全的方法调度任务
-        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        # 使用 asyncio.run_coroutine_threadsafe 调度协程
+        coro = functools.partial(self.handle_created_or_modified, event)
+        asyncio.run_coroutine_threadsafe(coro(), self.loop)  # 通过主线程的事件循环调度
         logging.debug(f"接收到修改事件: {file_path}")
 
     def on_deleted(self, event):
@@ -317,9 +318,9 @@ class AListSyncHandler(FileSystemEventHandler):
         Watchdog 回调：文件或文件夹被删除
         """
         file_path = event.src_path
-        coro = self.handle_deleted(event)
-        # 使用线程安全的方法调度任务
-        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        # 使用 asyncio.run_coroutine_threadsafe 调度协程
+        coro = functools.partial(self.handle_deleted, event)
+        asyncio.run_coroutine_threadsafe(coro(), self.loop)  # 通过主线程的事件循环调度
         logging.debug(f"接收到删除事件: {file_path}")
 
     def on_moved(self, event):
@@ -327,9 +328,9 @@ class AListSyncHandler(FileSystemEventHandler):
         Watchdog 回调：文件或文件夹被移动
         """
         file_path = event.src_path  # 使用源路径作为键
-        coro = self.handle_moved(event)
-        # 使用线程安全的方法调度任务
-        self.loop.call_soon_threadsafe(self.schedule_task, coro, file_path)
+        # 使用 asyncio.run_coroutine_threadsafe 调度协程
+        coro = functools.partial(self.handle_moved, event)
+        asyncio.run_coroutine_threadsafe(coro(), self.loop)  # 通过主线程的事件循环调度
         logging.debug(f"接收到移动事件: {file_path} -> {event.dest_path}")
 
 
