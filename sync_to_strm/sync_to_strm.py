@@ -4,8 +4,6 @@ import datetime
 import logging
 import re
 import time
-import threading
-from collections import defaultdict
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -64,8 +62,6 @@ class SyncHandler(FileSystemEventHandler):
         self.source_dir = source_dir
         self.target_dir = target_dir
         self.media_prefix = media_prefix
-        self.debounce_timers = defaultdict(threading.Timer)
-        self.DEBOUNCE_DELAY = 120  # 延迟时间（秒）
 
     def get_relative_path(self, full_path):
         return os.path.relpath(full_path, self.source_dir).replace("\\", "/")
@@ -74,31 +70,21 @@ class SyncHandler(FileSystemEventHandler):
         """检查文件是否是媒体文件"""
         return any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in MEDIA_FILE_TYPES)
 
-    def handle_debounced_event(self, event, relative_path):
-        """延迟处理文件事件以防止多次触发"""
+    def on_created(self, event):
+        relative_path = self.get_relative_path(event.src_path)
+
+        if event.src_path.lower().endswith('.mp'):
+            log_message(f"忽略 .mp 文件创建事件: {event.src_path}")
+            return
+
         if event.is_directory:
             self.handle_directory_event(event, relative_path)
         else:
             self.handle_file_event(event, relative_path)
-        # 移除已处理的计时器
-        if relative_path in self.debounce_timers:
-            del self.debounce_timers[relative_path]
-
-    def on_created(self, event):
-        relative_path = self.get_relative_path(event.src_path)
-        if relative_path in self.debounce_timers:
-            self.debounce_timers[relative_path].cancel()
-        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
-        self.debounce_timers[relative_path] = timer
-        timer.start()
 
     def on_modified(self, event):
-        relative_path = self.get_relative_path(event.src_path)
-        if relative_path in self.debounce_timers:
-            self.debounce_timers[relative_path].cancel()
-        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
-        self.debounce_timers[relative_path] = timer
-        timer.start()
+        """去除文件修改的事件处理逻辑"""
+        pass
 
     def on_deleted(self, event):
         relative_path = self.get_relative_path(event.src_path)
@@ -110,11 +96,7 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         relative_path = self.get_relative_path(event.src_path)
-        if relative_path in self.debounce_timers:
-            self.debounce_timers[relative_path].cancel()
-        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
-        self.debounce_timers[relative_path] = timer
-        timer.start()
+        self.handle_file_event(event, relative_path)
 
     def handle_file_event(self, event, relative_path):
         """处理文件的创建、修改或删除"""
@@ -123,16 +105,19 @@ class SyncHandler(FileSystemEventHandler):
             # 获取源和目标的相对路径
             dest_relative_path = self.get_relative_path(event.dest_path)
 
+            # 如果源文件是 .mp 文件且目标文件是有效的媒体文件类型，生成 .strm 文件
             if event.src_path.lower().endswith('.mp') and self.is_media_file(dest_relative_path):
-                # log_message(f"忽略处理重命名文件: {event.src_path} -> {event.dest_path}")
-                return  # 忽略处理
+                log_message(f"文件重命名: {event.src_path} -> {event.dest_path}")
+                # 生成 .strm 文件
+                self.create_strm_file(dest_relative_path)
+                return  # 处理完后直接返回，跳过其他同步
 
             if event.src_path.endswith('.mp'):
                 # 重新同步文件
                 self.sync_file(self.get_relative_path(event.dest_path))
             return
 
-        if event.event_type in ['created', 'modified']:
+        if event.event_type == 'created':  # 只处理创建事件
             if self.is_media_file(relative_path):
                 self.create_strm_file(relative_path)
             else:
@@ -267,7 +252,6 @@ try:
     while True:
         time.sleep(1)
 except KeyboardInterrupt:
-    log_message("========== 停止监控任务 ==========")
     for observer in observers:
         observer.stop()
     for observer in observers:
