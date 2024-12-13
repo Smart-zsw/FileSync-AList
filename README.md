@@ -92,3 +92,13 @@ sync:
   base_url: "http://your-base-url"                # 生成 .strm 文件链接的基础 URL
   debounce_delay: 120                             # 防抖延迟时间（秒）
 ```
+
+## 本项目遵循以下开源许可证：
+
+- **MIT 许可证**：适用于本项目的所有代码。
+- **LGPL 2.1 许可证**：适用于本项目使用的 [AList3SDK](https://github.com/moyanj/AList3SDK) 库。
+
+### 许可证详情
+
+- 本项目代码使用 **MIT 许可证**，可以自由使用、复制、修改、合并、发布、分发、再授权和销售。
+- 本项目使用的 **AList3SDK** 库遵循 **LGPL 2.1 许可证**，该库的使用和分发需遵循相应的开源条款。具体许可证内容请参见 [LGPL 2.1 官方文档](https://www.gnu.org/licenses/lgpl-2.1.html)。
