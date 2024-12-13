@@ -23,8 +23,6 @@ MAX_LOG_FILES = int(os.getenv('MAX_LOG_FILES', 5))
 USE_DIRECT_LINK = os.getenv('USE_DIRECT_LINK', 'False').lower() == 'true'
 BASE_URL = os.getenv('BASE_URL', '')
 
-# 忽略的文件扩展名
-IGNORE_FILE_TYPES = ['.mp']
 
 # 初始化日志
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
@@ -76,10 +74,6 @@ class SyncHandler(FileSystemEventHandler):
         """检查文件是否是媒体文件"""
         return any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in MEDIA_FILE_TYPES)
 
-    def is_ignored_file(self, relative_path):
-        """检查文件是否是需要忽略的文件类型（例如 .mp）"""
-        return os.path.splitext(relative_path)[1].lower() in IGNORE_FILE_TYPES
-
     def handle_debounced_event(self, event, relative_path):
         """延迟处理文件事件以防止多次触发"""
         if event.is_directory:
@@ -114,10 +108,28 @@ class SyncHandler(FileSystemEventHandler):
         else:
             self.handle_file_event(event, relative_path)
 
+    def on_moved(self, event):
+        relative_path = self.get_relative_path(event.src_path)
+        if relative_path in self.debounce_timers:
+            self.debounce_timers[relative_path].cancel()
+        timer = threading.Timer(self.DEBOUNCE_DELAY, self.handle_debounced_event, args=(event, relative_path))
+        self.debounce_timers[relative_path] = timer
+        timer.start()
+
     def handle_file_event(self, event, relative_path):
         """处理文件的创建、修改或删除"""
-        if self.is_ignored_file(relative_path):
-            # log_message(f"跳过: 忽略文件类型: {relative_path}")
+        # 检查是否是被重命名的文件
+        if event.event_type == 'moved':
+            # 获取源和目标的相对路径
+            dest_relative_path = self.get_relative_path(event.dest_path)
+
+            if event.src_path.lower().endswith('.mp') and self.is_media_file(dest_relative_path):
+                # log_message(f"忽略处理重命名文件: {event.src_path} -> {event.dest_path}")
+                return  # 忽略处理
+
+            if event.src_path.endswith('.mp'):
+                # 重新同步文件
+                self.sync_file(self.get_relative_path(event.dest_path))
             return
 
         if event.event_type in ['created', 'modified']:
