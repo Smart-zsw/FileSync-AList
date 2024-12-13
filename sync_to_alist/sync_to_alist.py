@@ -7,6 +7,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from alist import AList, AListUser
 
+# 定义字幕文件的扩展名
+SUBTITLE_EXTENSIONS = {'.srt', '.ass', '.sub', '.vtt'}
 
 class AListSyncHandler(FileSystemEventHandler):
     def __init__(
@@ -45,11 +47,18 @@ class AListSyncHandler(FileSystemEventHandler):
                 self.existing_paths.add(path)
         logging.info(f"已记录 {len(self.existing_paths)} 个现有路径，不会监控这些路径。")
 
-    def should_ignore_file(self, file_path):
+    def should_ignore_file_creation_deletion(self, file_path):
         """
-        判断文件是否是以 .mp 结尾的文件，若是则忽略。
+        判断文件是否是以 .mp 结尾的文件，若是则在创建和删除事件中忽略。
         """
-        return file_path.endswith(".mp")
+        return file_path.lower().endswith(".mp")
+
+    def is_subtitle_file(self, file_path):
+        """
+        判断文件是否为字幕文件。
+        """
+        _, ext = os.path.splitext(file_path)
+        return ext.lower() in SUBTITLE_EXTENSIONS
 
     def get_relative_path(self, src_path):
         """
@@ -122,18 +131,6 @@ class AListSyncHandler(FileSystemEventHandler):
                 previous_size = current_size
             await asyncio.sleep(check_interval)
 
-    def schedule_complete_task(self, coro, file_path):
-        """
-        调度一个完整性检查后的任务
-        """
-        if file_path in self._tasks:
-            task = self._tasks[file_path]
-            task.cancel()
-            logging.debug(f"取消之前的完整性检查任务: {file_path}")
-        future = asyncio.run_coroutine_threadsafe(self.debounce(coro, file_path), self.loop)
-        self._tasks[file_path] = future
-        logging.debug(f"调度完整性检查后的新任务: {file_path}")
-
     async def handle_created_or_modified(self, event):
         """
         处理文件或文件夹的创建和修改事件
@@ -145,46 +142,53 @@ class AListSyncHandler(FileSystemEventHandler):
             logging.warning(f"跳过相对路径为 '.' 或空字符串的事件: {event.src_path}")
             return
 
-        # 跳过 .mp 文件
-        if self.should_ignore_file(relative_path):
-            # logging.warning(f"跳过 .mp 文件: {event.src_path}")
+        # 对于创建事件，忽略 .mp 文件
+        if event.event_type == 'created' and self.should_ignore_file_creation_deletion(relative_path):
+            logging.debug(f"忽略创建事件中的 .mp 文件: {relative_path}")
             return
 
-        # 检查是否是新增文件或文件夹
-        if relative_path in self.existing_paths:
-            logging.debug(f"路径已存在，不处理: {relative_path}")
-            return
+        # 对于修改事件，处理所有文件
+        if event.event_type == 'modified':
+            # 这里可以添加针对修改事件的特定逻辑
+            if self.is_subtitle_file(relative_path):
+                logging.info(f"检测到字幕文件修改: {relative_path}")
+                await self.copy_subtitle_file(relative_path)
 
-        # 标记为已存在
-        self.existing_paths.add(relative_path)
-        logging.info(f"新增路径: {relative_path}")
+        # 检查是否是新增文件或文件夹（仅处理修改事件中的新增）
+        if event.event_type == 'modified' and relative_path not in self.existing_paths:
+            # 标记为已存在
+            self.existing_paths.add(relative_path)
+            # logging.info(f"新增路径 (修改事件): {relative_path}")
 
-        remote_source_path = self.get_remote_source_path(relative_path)  # AList 中的源路径
-        remote_destination_path = self.get_remote_destination_path(relative_path)  # AList 中的目的路径
+            remote_source_path = self.get_remote_source_path(relative_path)  # AList 中的源路径
+            remote_destination_path = self.get_remote_destination_path(relative_path)  # AList 中的目的路径
 
-        if event.is_directory:
-            # 对于文件夹，只创建目标文件夹
-            success = await self.alist.mkdir(remote_destination_path)
-            if success:
-                logging.info(f"文件夹创建成功: {remote_destination_path}")
+            if event.is_directory:
+                # 对于文件夹，只创建目标文件夹
+                success = await self.alist.mkdir(remote_destination_path)
+                if success:
+                    logging.info(f"文件夹创建成功: {remote_destination_path}")
+                else:
+                    logging.error(f"文件夹创建失败或已存在: {remote_destination_path}")
             else:
-                logging.error(f"文件夹创建失败或已存在: {remote_destination_path}")
-        else:
-            # 文件：先检查文件是否完整，然后复制
-            file_path = event.src_path
-            if await self.is_file_complete(file_path):
-                await self.copy_file(remote_source_path, remote_destination_path)
-            else:
-                logging.error(f"文件未完成写入，无法复制: {file_path}")
+                # 文件：先检查文件是否完整，然后复制
+                file_path = event.src_path
+                if await self.is_file_complete(file_path):
+                    await self.copy_file(remote_source_path, remote_destination_path)
+                else:
+                    logging.error(f"文件未完成写入，无法复制: {file_path}")
 
-    async def copy_file(self, remote_source_path, remote_destination_path):
+    async def copy_subtitle_file(self, relative_path):
         """
         复制文件到 AList
         在复制之前，先刷新源目录，确保 AList 检测到新增的文件
         """
-        source_dir = os.path.dirname(remote_source_path)
+        remote_source_path = self.get_remote_source_path(relative_path)
+        remote_destination_path = self.get_remote_destination_path(relative_path)
+
         try:
             # 调用 list_dir 并强制刷新源目录
+            source_dir = os.path.dirname(remote_source_path)
             async for _ in self.alist.list_dir(source_dir, refresh=True):
                 pass  # 仅需要执行刷新，无需处理返回的生成器
             # logging.info(f"刷新 AList 中的源路径目录: {source_dir}")
@@ -198,9 +202,9 @@ class AListSyncHandler(FileSystemEventHandler):
             destination_dir = os.path.dirname(remote_destination_path)
             success = await self.alist.copy(remote_source_path, destination_dir)
             if success:
-                logging.info(f"文件复制成功: {remote_source_path} -> {remote_destination_path}")
+                logging.info(f"字幕文件复制成功: {remote_source_path} -> {remote_destination_path}")
             else:
-                logging.error(f"文件复制失败: {remote_source_path} -> {remote_destination_path}")
+                logging.error(f"字幕文件复制失败: {remote_source_path} -> {remote_destination_path}")
         except Exception as e:
             logging.error(f"执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
@@ -215,9 +219,9 @@ class AListSyncHandler(FileSystemEventHandler):
             logging.warning(f"跳过相对路径为 '.' 或空字符串的删除事件: {event.src_path}")
             return
 
-        # 跳过 .mp 文件
-        if self.should_ignore_file(relative_path):
-            # logging.warning(f"跳过 .mp 文件: {event.src_path}")
+        # 对于删除事件，忽略 .mp 文件
+        if self.should_ignore_file_creation_deletion(relative_path):
+            logging.debug(f"忽略删除事件中的 .mp 文件: {relative_path}")
             return
 
         # 仅处理程序启动后新增的文件或文件夹的删除
@@ -257,6 +261,19 @@ class AListSyncHandler(FileSystemEventHandler):
         # 跳过相对路径为 '.' 或空字符串的事件
         if relative_src_path in ('', '.') or relative_dst_path in ('', '.'):
             logging.warning(f"跳过相对路径为 '.' 或空字符串的移动事件: {event.src_path} -> {event.dest_path}")
+            return
+
+        # 检查是否是从 .mp 重命名为字幕文件
+        src_ext = os.path.splitext(relative_src_path)[1].lower()
+        dst_ext = os.path.splitext(relative_dst_path)[1].lower()
+
+        if src_ext == ".mp" and self.is_subtitle_file(relative_dst_path):
+            # logging.info(f"检测到 .mp 文件重命名为字幕文件: {relative_src_path} -> {relative_dst_path}")
+            await self.copy_subtitle_file(relative_dst_path)
+            # 更新 existing_paths
+            self.existing_paths.discard(relative_src_path)
+            self.existing_paths.add(relative_dst_path)
+            logging.debug(f"更新 existing_paths: {relative_src_path} -> {relative_dst_path}")
             return
 
         src_in_existing = relative_src_path in self.existing_paths
@@ -349,6 +366,32 @@ class AListSyncHandler(FileSystemEventHandler):
         asyncio.run_coroutine_threadsafe(coro(), self.loop)  # 通过主线程的事件循环调度
         logging.debug(f"接收到移动事件: {file_path} -> {event.dest_path}")
 
+    async def copy_file(self, remote_source_path, remote_destination_path):
+        """
+        复制文件到 AList
+        在复制之前，先刷新源目录，确保 AList 检测到新增的文件
+        """
+        source_dir = os.path.dirname(remote_source_path)
+        try:
+            # 调用 list_dir 并强制刷新源目录
+            async for _ in self.alist.list_dir(source_dir, refresh=True):
+                pass  # 仅需要执行刷新，无需处理返回的生成器
+            # logging.info(f"刷新 AList 中的源路径目录: {source_dir}")
+        except Exception as e:
+            logging.error(f"刷新 AList 中的源路径目录失败: {source_dir}, 错误: {e}")
+            return  # 如果刷新失败，则不进行复制操作
+
+        # 执行复制操作
+        try:
+            # 根据 API 文档，copy 方法的第二个参数应该是目标目录，而不是完整的目标路径
+            destination_dir = os.path.dirname(remote_destination_path)
+            success = await self.alist.copy(remote_source_path, destination_dir)
+            if success:
+                logging.info(f"文件复制成功: {remote_source_path} -> {remote_destination_path}")
+            else:
+                logging.error(f"文件复制失败: {remote_source_path} -> {remote_destination_path}")
+        except Exception as e:
+            logging.error(f"执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
 async def main():
     # 从环境变量读取配置
@@ -437,7 +480,6 @@ async def main():
         observer.stop()
         logging.info("停止监控。")
     observer.join()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
