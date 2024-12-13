@@ -70,11 +70,35 @@ class SyncHandler(FileSystemEventHandler):
         """检查文件是否是媒体文件"""
         return any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in MEDIA_FILE_TYPES)
 
+    def is_file_stable(self, file_path, check_interval=2, max_checks=5):
+        """
+        检测文件是否稳定（大小保持不变）。
+
+        :param file_path: 文件路径
+        :param check_interval: 每次检查的间隔时间（秒）
+        :param max_checks: 最大检查次数
+        :return: 如果文件稳定返回 True，否则返回 False
+        """
+        try:
+            previous_size = -1
+            for _ in range(max_checks):
+                if not os.path.exists(file_path):
+                    return False  # 文件可能被删除
+                current_size = os.path.getsize(file_path)
+                if current_size == previous_size:
+                    return True  # 文件大小稳定
+                previous_size = current_size
+                time.sleep(check_interval)  # 等待一段时间后再次检查
+            return False  # 超过检查次数，文件仍不稳定
+        except Exception as e:
+            logging.error(f"检测文件稳定性时出错: {file_path}, 错误: {e}")
+            return False
+
     def on_created(self, event):
         relative_path = self.get_relative_path(event.src_path)
 
         if event.src_path.lower().endswith('.mp'):
-            log_message(f"忽略 .mp 文件创建事件: {event.src_path}")
+            logging.debug(f"忽略 .mp 文件创建事件: {event.src_path}")
             return
 
         if event.is_directory:
@@ -107,7 +131,7 @@ class SyncHandler(FileSystemEventHandler):
 
             # 如果源文件是 .mp 文件且目标文件是有效的媒体文件类型，生成 .strm 文件
             if event.src_path.lower().endswith('.mp') and self.is_media_file(dest_relative_path):
-                log_message(f"文件重命名: {event.src_path} -> {event.dest_path}")
+                logging.debug(f"文件重命名: {event.src_path} -> {event.dest_path}")
                 # 生成 .strm 文件
                 self.create_strm_file(dest_relative_path)
                 return  # 处理完后直接返回，跳过其他同步
@@ -117,11 +141,21 @@ class SyncHandler(FileSystemEventHandler):
                 self.sync_file(self.get_relative_path(event.dest_path))
             return
 
+        source_file_path = os.path.join(self.source_dir, relative_path).replace("\\", "/")
+
         if event.event_type == 'created':  # 只处理创建事件
             if self.is_media_file(relative_path):
-                self.create_strm_file(relative_path)
+                # 检测文件是否稳定
+                if self.is_file_stable(source_file_path):
+                    self.create_strm_file(relative_path)
+                else:
+                    log_message(f"跳过: 文件不稳定或被删除: {source_file_path}")
             else:
-                self.sync_file(relative_path)
+                # 检测文件是否稳定
+                if self.is_file_stable(source_file_path):
+                    self.sync_file(relative_path)
+                else:
+                    log_message(f"跳过: 文件不稳定或被删除: {source_file_path}")
         elif event.event_type == 'deleted' and ENABLE_CLEANUP:
             self.delete_target_file(relative_path)
 
