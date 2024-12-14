@@ -398,36 +398,27 @@ async def main():
     endpoint = os.getenv("ALIST_ENDPOINT")
     username = os.getenv("ALIST_USERNAME")
     password_file = os.getenv("ALIST_PASSWORD_FILE", "/config/secrets/alist_password.txt")
-    source_base_directory = os.getenv("ALIST_SOURCE_BASE_DIRECTORY")
-    remote_base_directory = os.getenv("ALIST_REMOTE_BASE_DIRECTORY")
-    local_directory = os.getenv("LOCAL_DIRECTORY")
-    log_file = os.getenv("LOG_FILE", "/config/logs/sync_to_alist.log")  # 更新为新的日志路径
+    log_file = os.getenv("LOG_FILE", "/config/logs/sync_to_alist.log")
     sync_delete_env = os.getenv("SYNC_DELETE", "false").lower()
     sync_delete = sync_delete_env == "true"
 
-    # 检查必需的环境变量是否存在
-    required_env_vars = [
-        "ALIST_ENDPOINT",
-        "ALIST_USERNAME",
-        "ALIST_SOURCE_BASE_DIRECTORY",
-        "ALIST_REMOTE_BASE_DIRECTORY",
-        "LOCAL_DIRECTORY"
-    ]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        print(f"缺少必要的环境变量: {', '.join(missing_vars)}")
-        logging.error(f"缺少必要的环境变量: {', '.join(missing_vars)}")
+    # 多个源和目标目录的配置
+    source_base_directories = os.getenv("ALIST_SOURCE_BASE_DIRECTORIES").split(";")
+    remote_base_directories = os.getenv("ALIST_REMOTE_BASE_DIRECTORIES").split(";")
+    local_directories = os.getenv("LOCAL_DIRECTORIES").split(";")
+
+    if len(source_base_directories) != len(remote_base_directories) or len(local_directories) != len(remote_base_directories):
+        logging.error("源目录、远程目录、本地目录数量不匹配，请检查配置。")
         return
 
     # 读取密码
     if not os.path.exists(password_file):
-        print(f"密码文件 {password_file} 不存在。")
         logging.error(f"密码文件 {password_file} 不存在。")
         return
     with open(password_file, "r") as f:
         password = f.read().strip()
 
-    # 确保日志目录存在
+    # 配置日志
     log_dir = os.path.dirname(log_file)
     os.makedirs(log_dir, exist_ok=True)
 
@@ -453,33 +444,36 @@ async def main():
 
     # 获取当前事件循环
     loop = asyncio.get_running_loop()
+    observers = []
 
-    # 初始化事件处理器
-    event_handler = AListSyncHandler(
-        alist=alist,
-        remote_base_path=remote_base_directory,
-        local_base_path=local_directory,
-        loop=loop,
-        source_base_directory=source_base_directory,
-        debounce_delay=1.0,  # 设置防抖延迟时间为1秒
-        sync_delete=sync_delete,  # 同步删除开关
-        file_stable_time=5.0  # 设置文件稳定时间为5秒
-    )
+    # 为每对目录设置同步处理器和监控
+    for local_dir, source_dir, remote_dir in zip(local_directories, source_base_directories, remote_base_directories):
+        event_handler = AListSyncHandler(
+            alist=alist,
+            remote_base_path=remote_dir,
+            local_base_path=local_dir,
+            loop=loop,
+            source_base_directory=source_dir,
+            debounce_delay=1.0,  # 设置防抖延迟时间为1秒
+            sync_delete=sync_delete,  # 同步删除开关
+            file_stable_time=5.0  # 设置文件稳定时间为5秒
+        )
 
-    # 设置观察者
-    observer = Observer()
-    observer.schedule(event_handler, path=local_directory, recursive=True)
-    observer.start()
-    logging.info(f"开始监控本地目录: {local_directory}")
-    logging.info(f"同步删除功能 {'启用' if sync_delete else '禁用'}。")
+        observer = Observer()
+        observer.schedule(event_handler, path=local_dir, recursive=True)
+        observer.start()
+        logging.info(f"开始监控本地目录: {local_dir}")
+        observers.append(observer)
 
     try:
         while True:
             await asyncio.sleep(1)  # 保持主线程运行
     except KeyboardInterrupt:
-        observer.stop()
-        logging.info("停止监控。")
-    observer.join()
+        for observer in observers:
+            observer.stop()
+        logging.info("停止所有监控。")
+    for observer in observers:
+        observer.join()
 
 if __name__ == "__main__":
     asyncio.run(main())
