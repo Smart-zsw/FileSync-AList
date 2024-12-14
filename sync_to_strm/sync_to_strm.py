@@ -7,7 +7,7 @@ import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-LOG_FILE = os.getenv('LOG_FILE', '/config/logs/sync.log')
+LOG_FILE = os.getenv('LOG_FILE', '/config/logs/sync_to_strm.log')
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 SYNC_DIRECTORIES = os.getenv('SYNC_DIRECTORIES', '').split(';')  # 多个路径映射用分号分隔
 MEDIA_FILE_TYPES = os.getenv('MEDIA_FILE_TYPES',
