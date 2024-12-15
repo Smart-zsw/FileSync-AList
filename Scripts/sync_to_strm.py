@@ -221,13 +221,13 @@ class SyncToStrm:
                             self.create_strm_file(relative_path, target_dir, media_prefix)
                         else:
                             self.sync_file(relative_path, source_dir, target_dir)
-                self.full_sync_on_startup = False
 
             observer = Observer()
             observer.schedule(event_handler, path=source_dir, recursive=True)
             observer.start()
             self.observers.append(observer)
 
+        self.full_sync_on_startup = False
         self.log_message("所有监控器已启动。")
 
     def stop(self):

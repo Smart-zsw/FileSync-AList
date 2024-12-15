@@ -7,9 +7,6 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from alist import AList, AListUser
 
-# 定义字幕文件的扩展名
-SUBTITLE_EXTENSIONS = {'.srt', '.ass', '.sub', '.vtt'}
-
 class AListSyncHandler(FileSystemEventHandler):
     def __init__(
             self,
@@ -18,6 +15,7 @@ class AListSyncHandler(FileSystemEventHandler):
             local_base_path: str,
             loop: asyncio.AbstractEventLoop,
             source_base_directory: str,
+            subtitle_extensions: set,  # 新增：字幕扩展名
             debounce_delay: float = 1.0,
             sync_delete: bool = False,
             file_stable_time: float = 5.0  # 新增：文件稳定时间（秒）
@@ -31,6 +29,7 @@ class AListSyncHandler(FileSystemEventHandler):
         self.debounce_delay = debounce_delay  # 防抖延迟时间（秒）
         self.sync_delete = sync_delete  # 同步删除开关
         self.file_stable_time = file_stable_time  # 文件稳定时间（秒）
+        self.subtitle_extensions = subtitle_extensions  # 设置字幕扩展名
         self._tasks = {}  # 跟踪文件路径到任务的映射
         self.existing_paths = set()  # 存储启动时已有的文件和文件夹的相对路径
 
@@ -58,7 +57,7 @@ class AListSyncHandler(FileSystemEventHandler):
         判断文件是否为字幕文件。
         """
         _, ext = os.path.splitext(file_path)
-        return ext.lower() in SUBTITLE_EXTENSIONS
+        return ext.lower() in self.subtitle_extensions
 
     def get_relative_path(self, src_path):
         """
@@ -144,7 +143,7 @@ class AListSyncHandler(FileSystemEventHandler):
             logging.debug(f"[ALIST] 忽略创建事件中的 .mp 文件: {relative_path}")
             return
 
-        # 对修改事件中的字幕文件特殊处理
+        # 仅在修改事件中且文件不在 existing_paths 时处理
         if event.event_type == 'modified':
             if self.is_subtitle_file(relative_path):
                 logging.info(f"[ALIST] 检测到字幕文件修改: {relative_path}")
@@ -336,8 +335,6 @@ class AListSyncHandler(FileSystemEventHandler):
             logging.error(f"[ALIST] 执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
 class SyncToAlist:
-    SUBTITLE_EXTENSIONS = {'.srt', '.ass', '.sub', '.vtt'}
-
     def __init__(self, alist_config, sync_config):
         self.endpoint = alist_config.get('endpoint')
         self.username = alist_config.get('username')
@@ -349,6 +346,8 @@ class SyncToAlist:
 
         self.debounce_delay = sync_config.get('debounce_delay', 1.0)
         self.file_stable_time = sync_config.get('file_stable_time', 5.0)
+
+        self.subtitle_extensions = set(alist_config.get('subtitle_extensions', {'.srt', '.ass', '.sub', '.vtt'}))  # 新增：从配置中获取字幕扩展名，设置默认值
 
         self.log_file = sync_config.get('log_file', '/config/logs/sync_to_alist.log')
         self.setup_logging()
@@ -392,6 +391,7 @@ class SyncToAlist:
                 local_base_path=local_dir,
                 loop=self.loop,
                 source_base_directory=source_dir,
+                subtitle_extensions=self.subtitle_extensions,  # 传递字幕扩展名
                 debounce_delay=self.debounce_delay,
                 sync_delete=self.sync_delete,
                 file_stable_time=self.file_stable_time

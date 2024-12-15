@@ -275,12 +275,12 @@ for mapping in SYNC_DIRECTORIES:
                     event_handler.create_strm_file(relative_path)
                 else:
                     event_handler.sync_file(relative_path)
-        FULL_SYNC_ON_STARTUP = False
 
     observer = Observer()
     observer.schedule(event_handler, path=source_dir, recursive=True)
     observer.start()
     observers.append(observer)
+    FULL_SYNC_ON_STARTUP = False
 
 try:
     while True:
