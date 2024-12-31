@@ -11,6 +11,7 @@ class AListSyncHandler(FileSystemEventHandler):
     def __init__(
             self,
             alist: AList,
+            user: AListUser,  # 新增：接收 AListUser 对象
             remote_base_path: str,
             local_base_path: str,
             loop: asyncio.AbstractEventLoop,
@@ -22,6 +23,7 @@ class AListSyncHandler(FileSystemEventHandler):
     ):
         super().__init__()
         self.alist = alist
+        self.user = user  # 新增：存储用户对象
         self.remote_base_path = remote_base_path.rstrip('/')
         self.local_base_path = local_base_path.rstrip('/')
         self.loop = loop
@@ -129,7 +131,7 @@ class AListSyncHandler(FileSystemEventHandler):
                 previous_size = current_size
             await asyncio.sleep(check_interval)
 
-    async def handle_created_or_modified(self, event):
+    async def handle_created_or_modified(self, event, retry=False):
         """
         处理文件或文件夹的创建和修改事件
         """
@@ -156,23 +158,37 @@ class AListSyncHandler(FileSystemEventHandler):
             remote_destination_path = self.get_remote_destination_path(relative_path)
 
             if event.is_directory:
-                # 对于文件夹，只创建目标文件夹
-                success = await self.alist.mkdir(remote_destination_path)
-                if success:
-                    logging.info(f"[ALIST] 文件夹创建成功: {remote_destination_path}")
-                else:
-                    logging.error(f"[ALIST] 文件夹创建失败或已存在: {remote_destination_path}")
+                try:
+                    success = await self.alist.mkdir(remote_destination_path)
+                    if success:
+                        logging.info(f"[ALIST] 文件夹创建成功: {remote_destination_path}")
+                    else:
+                        logging.error(f"[ALIST] 文件夹创建失败或已存在: {remote_destination_path}")
+                except Exception as e:
+                    if not retry and 'token is expired' in str(e).lower():
+                        logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试 mkdir 操作。")
+                        await self.alist.login(self.user)
+                        await self.handle_created_or_modified(event, retry=True)
+                    else:
+                        logging.error(f"[ALIST] 创建文件夹失败: {remote_destination_path}, 错误: {e}")
             else:
-                # 文件：先检查文件是否完整，然后复制
                 file_path = event.src_path
-                if await self.is_file_complete(file_path):
-                    await self.copy_file(remote_source_path, remote_destination_path)
-                else:
-                    logging.error(f"[ALIST] 文件未完成写入，无法复制: {file_path}")
+                try:
+                    if await self.is_file_complete(file_path):
+                        await self.copy_file(remote_source_path, remote_destination_path)
+                    else:
+                        logging.error(f"[ALIST] 文件未完成写入，无法复制: {file_path}")
+                except Exception as e:
+                    if not retry and 'token is expired' in str(e).lower():
+                        logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试复制文件操作。")
+                        await self.alist.login(self.user)
+                        await self.handle_created_or_modified(event, retry=True)
+                    else:
+                        logging.error(f"[ALIST] 处理创建或修改事件时出错: {file_path}, 错误: {e}")
 
-    async def copy_subtitle_file(self, relative_path):
+    async def copy_subtitle_file(self, relative_path, retry=False):
         """
-        复制文件到 AList
+        复制字幕文件到 AList
         在复制之前，先刷新源目录，确保 AList 检测到新增的文件
         """
         remote_source_path = self.get_remote_source_path(relative_path)
@@ -182,6 +198,11 @@ class AListSyncHandler(FileSystemEventHandler):
             async for _ in self.alist.list_dir(source_dir, refresh=True):
                 pass
         except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试刷新源路径目录。")
+                await self.alist.login(self.user)
+                await self.copy_subtitle_file(relative_path, retry=True)
+                return
             logging.error(f"[ALIST] 刷新 AList 中的源路径目录失败: {source_dir}, 错误: {e}")
             return
 
@@ -194,9 +215,14 @@ class AListSyncHandler(FileSystemEventHandler):
             else:
                 logging.error(f"[ALIST] 字幕文件复制失败: {remote_source_path} -> {remote_destination_path}")
         except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试复制字幕文件操作。")
+                await self.alist.login(self.user)
+                await self.copy_subtitle_file(relative_path, retry=True)
+                return
             logging.error(f"[ALIST] 执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
-    async def handle_deleted(self, event):
+    async def handle_deleted(self, event, retry=False):
         """
         处理文件或文件夹的删除事件
         """
@@ -215,22 +241,30 @@ class AListSyncHandler(FileSystemEventHandler):
             return
 
         remote_destination_path = self.get_remote_destination_path(relative_path)
-        if event.is_directory:
-            success = await self.alist.remove_folder(remote_destination_path)
-            if success:
-                logging.info(f"[ALIST] 文件夹删除成功: {remote_destination_path}")
+        try:
+            if event.is_directory:
+                success = await self.alist.remove_folder(remote_destination_path)
+                if success:
+                    logging.info(f"[ALIST] 文件夹删除成功: {remote_destination_path}")
+                else:
+                    logging.error(f"[ALIST] 文件夹删除失败: {remote_destination_path}")
             else:
-                logging.error(f"[ALIST] 文件夹删除失败: {remote_destination_path}")
-        else:
-            success = await self.alist.remove(remote_destination_path)
-            if success:
-                logging.info(f"[ALIST] 文件删除成功: {remote_destination_path}")
+                success = await self.alist.remove(remote_destination_path)
+                if success:
+                    logging.info(f"[ALIST] 文件删除成功: {remote_destination_path}")
+                else:
+                    logging.error(f"[ALIST] 文件删除失败: {remote_destination_path}")
+            self.existing_paths.discard(relative_path)
+            logging.debug(f"[ALIST] 从 existing_paths 中移除: {relative_path}")
+        except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试删除操作。")
+                await self.alist.login(self.user)
+                await self.handle_deleted(event, retry=True)
             else:
-                logging.error(f"[ALIST] 文件删除失败: {remote_destination_path}")
-        self.existing_paths.discard(relative_path)
-        logging.debug(f"[ALIST] 从 existing_paths 中移除: {relative_path}")
+                logging.error(f"[ALIST] 处理删除事件时出错: {relative_path}, 错误: {e}")
 
-    async def handle_moved(self, event):
+    async def handle_moved(self, event, retry=False):
         relative_src_path = self.get_relative_path(event.src_path)
         relative_dst_path = self.get_relative_path(event.dest_path)
 
@@ -249,46 +283,54 @@ class AListSyncHandler(FileSystemEventHandler):
         src_in_existing = relative_src_path in self.existing_paths
         dst_in_existing = relative_dst_path in self.existing_paths
 
-        if src_in_existing and not dst_in_existing:
-            if self.sync_delete:
-                remote_src_path = self.get_remote_destination_path(relative_src_path)
-                if event.is_directory:
-                    success = await self.alist.remove_folder(remote_src_path)
-                    if success:
-                        logging.info(f"[ALIST] 文件夹移动删除成功: {remote_src_path}")
+        try:
+            if src_in_existing and not dst_in_existing:
+                if self.sync_delete:
+                    remote_src_path = self.get_remote_destination_path(relative_src_path)
+                    if event.is_directory:
+                        success = await self.alist.remove_folder(remote_src_path)
+                        if success:
+                            logging.info(f"[ALIST] 文件夹移动删除成功: {remote_src_path}")
+                        else:
+                            logging.error(f"[ALIST] 文件夹移动删除失败: {remote_src_path}")
                     else:
-                        logging.error(f"[ALIST] 文件夹移动删除失败: {remote_src_path}")
+                        success = await self.alist.remove(remote_src_path)
+                        if success:
+                            logging.info(f"[ALIST] 文件移动删除成功: {remote_src_path}")
+                        else:
+                            logging.error(f"[ALIST] 文件移动删除失败: {remote_src_path}")
+                self.existing_paths.discard(relative_src_path)
+                logging.debug(f"[ALIST] 从 existing_paths 中移除源路径: {relative_src_path}")
+
+            if not src_in_existing and dst_in_existing:
+                remote_src_path = self.get_remote_source_path(relative_dst_path)
+                remote_dst_path = self.get_remote_destination_path(relative_dst_path)
+                success = await self.alist.rename(remote_src_path, remote_dst_path)
+                if success:
+                    logging.info(f"[ALIST] 重命名成功: {remote_src_path} -> {remote_dst_path}")
                 else:
-                    success = await self.alist.remove(remote_src_path)
-                    if success:
-                        logging.info(f"[ALIST] 文件移动删除成功: {remote_src_path}")
-                    else:
-                        logging.error(f"[ALIST] 文件移动删除失败: {remote_src_path}")
-            self.existing_paths.discard(relative_src_path)
-            logging.debug(f"[ALIST] 从 existing_paths 中移除源路径: {relative_src_path}")
+                    logging.error(f"[ALIST] 重命名失败: {remote_src_path} -> {remote_dst_path}")
+                self.existing_paths.add(relative_dst_path)
+                logging.debug(f"[ALIST] 添加到 existing_paths: {relative_dst_path}")
 
-        if not src_in_existing and dst_in_existing:
-            remote_src_path = self.get_remote_source_path(relative_dst_path)
-            remote_dst_path = self.get_remote_destination_path(relative_dst_path)
-            success = await self.alist.rename(remote_src_path, remote_dst_path)
-            if success:
-                logging.info(f"[ALIST] 重命名成功: {remote_src_path} -> {remote_dst_path}")
+            if src_in_existing and dst_in_existing:
+                remote_src_path = self.get_remote_destination_path(relative_src_path)
+                remote_dst_path = self.get_remote_destination_path(relative_dst_path)
+                success = await self.alist.rename(remote_src_path, remote_dst_path)
+                if success:
+                    logging.info(f"[ALIST] 重命名成功: {remote_src_path} -> {remote_dst_path}")
+                else:
+                    logging.error(f"[ALIST] 重命名失败: {remote_src_path} -> {remote_dst_path}")
+                self.existing_paths.discard(relative_src_path)
+                self.existing_paths.add(relative_dst_path)
+                logging.debug(f"[ALIST] 更新 existing_paths: {relative_src_path} -> {relative_dst_path}")
+        except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试移动操作。")
+                await self.alist.login(self.user)
+                await self.handle_moved(event, retry=True)
             else:
-                logging.error(f"[ALIST] 重命名失败: {remote_src_path} -> {remote_dst_path}")
-            self.existing_paths.add(relative_dst_path)
-            logging.debug(f"[ALIST] 添加到 existing_paths: {relative_dst_path}")
-
-        if src_in_existing and dst_in_existing:
-            remote_src_path = self.get_remote_destination_path(relative_src_path)
-            remote_dst_path = self.get_remote_destination_path(relative_dst_path)
-            success = await self.alist.rename(remote_src_path, remote_dst_path)
-            if success:
-                logging.info(f"[ALIST] 重命名成功: {remote_src_path} -> {remote_dst_path}")
-            else:
-                logging.error(f"[ALIST] 重命名失败: {remote_src_path} -> {remote_dst_path}")
-            self.existing_paths.discard(relative_src_path)
-            self.existing_paths.add(relative_dst_path)
-            logging.debug(f"[ALIST] 更新 existing_paths: {relative_src_path} -> {relative_dst_path}")
+                logging.error(f"[ALIST] 处理移动事件时出错: {event.src_path} -> {event.dest_path}, 错误: {e}")
 
     def on_created(self, event):
         file_path = event.src_path
@@ -314,12 +356,17 @@ class AListSyncHandler(FileSystemEventHandler):
         asyncio.run_coroutine_threadsafe(coro(), self.loop)
         logging.debug(f"[ALIST] 接收到移动事件: {file_path} -> {event.dest_path}")
 
-    async def copy_file(self, remote_source_path, remote_destination_path):
+    async def copy_file(self, remote_source_path, remote_destination_path, retry=False):
         source_dir = os.path.dirname(remote_source_path)
         try:
             async for _ in self.alist.list_dir(source_dir, refresh=True):
                 pass
         except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试刷新源路径目录。")
+                await self.alist.login(self.user)
+                await self.copy_file(remote_source_path, remote_destination_path, retry=True)
+                return
             logging.error(f"[ALIST] 刷新 AList 中的源路径目录失败: {source_dir}, 错误: {e}")
             return
 
@@ -332,6 +379,11 @@ class AListSyncHandler(FileSystemEventHandler):
             else:
                 logging.error(f"[ALIST] 文件复制失败: {remote_source_path} -> {remote_destination_path}")
         except Exception as e:
+            if not retry and 'token is expired' in str(e).lower():
+                logging.warning(f"[ALIST] Token 过期，尝试重新登录并重试复制文件操作。")
+                await self.alist.login(self.user)
+                await self.copy_file(remote_source_path, remote_destination_path, retry=True)
+                return
             logging.error(f"[ALIST] 执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
 class SyncToAlist:
@@ -387,6 +439,7 @@ class SyncToAlist:
         for local_dir, source_dir, remote_dir in zip(self.local_directories, self.source_base_directories, self.remote_base_directories):
             event_handler = AListSyncHandler(
                 alist=self.alist,
+                user=self.user,  # 新增：传递用户对象
                 remote_base_path=remote_dir,
                 local_base_path=local_dir,
                 loop=self.loop,
