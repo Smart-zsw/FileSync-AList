@@ -2,10 +2,10 @@ import asyncio
 import functools
 import os
 import logging
-from logging.handlers import RotatingFileHandler
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from alist import AList, AListUser
+
 
 class AListSyncHandler(FileSystemEventHandler):
     def __init__(
@@ -386,6 +386,7 @@ class AListSyncHandler(FileSystemEventHandler):
                 return
             logging.error(f"[ALIST] 执行复制操作时出错: {remote_source_path} -> {remote_destination_path}, 错误: {e}")
 
+
 class SyncToAlist:
     def __init__(self, alist_config, sync_config):
         self.endpoint = alist_config.get('endpoint')
@@ -399,28 +400,13 @@ class SyncToAlist:
         self.debounce_delay = sync_config.get('debounce_delay', 1.0)
         self.file_stable_time = sync_config.get('file_stable_time', 5.0)
 
-        self.subtitle_extensions = set(alist_config.get('subtitle_extensions', {'.srt', '.ass', '.sub', '.vtt'}))  # 新增：从配置中获取字幕扩展名，设置默认值
-
-        self.log_file = sync_config.get('log_file', '/config/logs/sync_to_alist.log')
-        self.setup_logging()
+        self.subtitle_extensions = set(
+            alist_config.get('subtitle_extensions', {'.srt', '.ass', '.sub', '.vtt'}))  # 新增：从配置中获取字幕扩展名，设置默认值
 
         self.alist = AList(endpoint=self.endpoint)
         self.user = AListUser(username=self.username, rawpwd=self.password)
         self.loop = asyncio.get_event_loop()
         self.observers = []
-
-    def setup_logging(self):
-        """配置日志系统"""
-        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-        logging.basicConfig(level=logging.INFO,
-                            format='[%(asctime)s] [%(levelname)s] %(message)s',
-                            datefmt='%Y/%m/%d %H:%M:%S',
-                            handlers=[
-                                RotatingFileHandler(self.log_file, maxBytes=10 * 1024 * 1024,
-                                                    backupCount=5, encoding='utf-8'),
-                                logging.StreamHandler()
-                            ])
-        logging.info("[ALIST] SyncToAlist 日志系统已配置。")
 
     async def run(self):
         """运行同步任务"""
@@ -432,11 +418,12 @@ class SyncToAlist:
         logging.info("[ALIST] 登录成功。")
 
         if (len(self.local_directories) != len(self.source_base_directories) or
-            len(self.local_directories) != len(self.remote_base_directories)):
+                len(self.local_directories) != len(self.remote_base_directories)):
             logging.error("[ALIST] alist 本地目录、源目录、远程目录数量不匹配，请检查配置。")
             return
 
-        for local_dir, source_dir, remote_dir in zip(self.local_directories, self.source_base_directories, self.remote_base_directories):
+        for local_dir, source_dir, remote_dir in zip(self.local_directories, self.source_base_directories,
+                                                     self.remote_base_directories):
             event_handler = AListSyncHandler(
                 alist=self.alist,
                 user=self.user,  # 新增：传递用户对象

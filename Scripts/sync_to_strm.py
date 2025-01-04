@@ -1,16 +1,14 @@
 import os
 import shutil
-import datetime
 import logging
 import re
 import time
-from logging.handlers import RotatingFileHandler
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+
 class SyncToStrm:
     def __init__(self, config):
-        self.log_file = config.get('log_file', '/config/logs/sync_to_strm.log')
         self.sync_directories = config.get('sync_directories', [])
         self.media_file_types = config.get('media_file_types', [
             "*.mp4", "*.mkv", "*.ts", "*.iso", "*.rmvb", "*.avi", "*.mov", "*.mpeg",
@@ -23,45 +21,8 @@ class SyncToStrm:
         self.use_direct_link = config.get('use_direct_link', False)
         self.base_url = config.get('base_url', '')
 
-        # 日志管理
-        self.max_log_file_size = 10 * 1024 * 1024
-        self.max_log_files = 5
-
-        # 初始化日志
-        self.setup_logging()
-
-    def setup_logging(self):
-        """配置日志系统"""
-        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-        logging.basicConfig(level=logging.INFO,
-                            format='[%(asctime)s] [%(levelname)s] %(message)s',
-                            datefmt='%Y/%m/%d %H:%M:%S',
-                            handlers=[
-                                RotatingFileHandler(self.log_file, maxBytes=self.max_log_file_size,
-                                                    backupCount=self.max_log_files, encoding='utf-8'),
-                                logging.StreamHandler()
-                            ])
-        logging.info("SyncToStrm 日志系统已配置。")
-
     def log_message(self, message):
         logging.info("[STRM] " + message)
-        self.manage_log_files()
-
-    def manage_log_files(self):
-        """管理日志文件大小和数量"""
-        if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > self.max_log_file_size:
-            timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-            os.rename(self.log_file, f"{self.log_file}.{timestamp}")
-            with open(self.log_file, 'w', encoding='utf-8') as log_file:
-                log_file.write(
-                    f"[{datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')}] 日志文件大小超过限制，已创建新日志文件\n")
-
-        log_dir = os.path.dirname(self.log_file)
-        log_files = sorted([f for f in os.listdir(log_dir) if f.startswith(os.path.basename(self.log_file))],
-                           reverse=True)
-        if len(log_files) > self.max_log_files:
-            for old_log in log_files[self.max_log_files:]:
-                os.remove(os.path.join(log_dir, old_log))
 
     def is_media_file(self, relative_path: str) -> bool:
         """检查文件是否是媒体文件"""
@@ -80,7 +41,8 @@ class SyncToStrm:
 
         def is_media_file(self, relative_path):
             """检查文件是否是媒体文件"""
-            return any(re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in self.parent.media_file_types)
+            return any(
+                re.fullmatch(pattern.replace("*", ".*"), relative_path) for pattern in self.parent.media_file_types)
 
         def is_file_stable(self, file_path, check_interval=2, max_checks=5):
             """

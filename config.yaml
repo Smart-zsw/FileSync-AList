@@ -1,21 +1,20 @@
 alist:
-  endpoint: "http://your-alist-endpoint"
+  endpoint: "http://192.168.1.1:5244"
   username: "your-username"
   password: "your-secure-password"
   source_base_directories:
-    - "/path/to/source1_base"
-    - "/path/to/source2_base"
+    - "/Media/media"
+    # - "/path/to/source2_base"
     # 添加更多的 base directories 如需
   remote_base_directories:
-    - "/path/to/remote1_base"
-    - "/path/to/remote2_base"
+    - "/115网盘/media"
+    # - "/path/to/remote2_base"
     # 添加更多的 base directories 如需
   local_directories:
-    - "/path/to/local1_base"
-    - "/path/to/local2_base"
+    - "/media"
+    # - "/path/to/local2_base"
     # 添加更多的 base directories 如需
   sync_delete: false
-  subtitle_extensions: [".srt", ".ass", ".sub", ".vtt"]
 
 sync:
   sync_directories:
@@ -49,4 +48,4 @@ sync:
   enable_cleanup: false
   full_sync_on_startup: true
   use_direct_link: true
-  base_url: "http://your-base-url"
+  base_url: "https://xxx.xxxxx.com/d/115网盘"
